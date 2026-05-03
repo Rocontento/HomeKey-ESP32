@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "esp_pm.h"
 #include <array>
 #include <atomic>
 #include <functional>
@@ -76,6 +77,7 @@ private:
 
     TaskHandle_t m_pollingTaskHandle;
     TaskHandle_t m_retryTaskHandle;
+    esp_pm_lock_handle_t m_pmLockApb = nullptr;
     TaskHandle_t m_authPrecomputeTaskHandle = nullptr;
 
     QueueHandle_t m_authCtxFreeQueue = nullptr;

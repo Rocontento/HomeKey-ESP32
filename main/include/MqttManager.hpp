@@ -95,7 +95,7 @@ private:
     void onData(const std::string& topic, const std::string& data);
 
     // --- Publishing Logic ---
-    void publish(const std::string& topic, const std::string& payload, int qos = 0, bool retain = false);
+    void publish(const std::string& topic, const std::string& payload, int qos = 1, bool retain = false);
     void publishHassDiscovery();
     void publishMqttStatus(bool connected, MqttErrorCode errorCode, const std::string& errorMessage = "");
 

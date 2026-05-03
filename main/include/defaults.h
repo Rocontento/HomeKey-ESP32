@@ -19,7 +19,7 @@
 #define MQTT_NO_TAG_PUBLISH false // Disable publishing of tags to MQTT topic
 
 //MQTT SSL/TLS Settings
-#define MQTT_USE_SSL false // Enable/disable SSL/TLS for MQTT connection
+#define MQTT_USE_SSL true // Enable/disable SSL/TLS for MQTT connection
 #define MQTT_CA_CERT "" // CA certificate for server validation (PEM format)
 #define MQTT_CLIENT_CERT "" // Client certificate for mutual authentication (PEM format)
 #define MQTT_CLIENT_KEY "" // Client private key for mutual authentication (PEM format)

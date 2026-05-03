@@ -267,6 +267,7 @@ bool NfcManager::begin() {
     ESP_LOGI(TAG, "NFC fast polling: %s", m_nfcFastPollingEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "Starting NFC polling task...");
     xTaskCreateUniversal(pollingTaskEntry, "nfc_poll_task", 8192, this, 2, &m_pollingTaskHandle, 1);
+    esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "nfc_spi", &m_pmLockApb);
     return true;
 }
 
@@ -403,11 +404,14 @@ void NfcManager::pollingTask() {
              static_cast<unsigned int>(passiveTargetTimeoutMs));
 
     while (true) {
+        if (m_pmLockApb) esp_pm_lock_acquire(m_pmLockApb);
+
         if (m_nfc->WriteRegister({0x63,0x3d,0x0}) != pn532::SUCCESS) {
             ESP_LOGE(TAG, "PN532 is unresponsive. Attempting to reconnect...");
             m_connected.store(false);
             m_fwMajor = 0;
             m_fwMinor = 0;
+            if (m_pmLockApb) esp_pm_lock_release(m_pmLockApb);
             startRetryTask();
             vTaskSuspend(NULL);
             continue;
@@ -420,7 +424,7 @@ void NfcManager::pollingTask() {
         std::array<uint8_t,2> sens_res;
         uint8_t sel_res;
         pn532::Status passiveTargetFound = m_nfc->InListPassiveTarget(PN532_MIFARE_ISO14443A, uid, sens_res, sel_res, passiveTargetTimeoutMs);
-        
+
         if (passiveTargetFound == pn532::SUCCESS) {
             ESP_LOGI(TAG, "NFC tag detected!");
             handleTagPresence(uid, sens_res, sel_res);
@@ -433,6 +437,7 @@ void NfcManager::pollingTask() {
             m_nfc->setPassiveActivationRetries(0);
         }
 
+        if (m_pmLockApb) esp_pm_lock_release(m_pmLockApb);
         vTaskDelay(pollDelayTicks);
         taskYIELD();
     }
