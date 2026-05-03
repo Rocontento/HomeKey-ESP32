@@ -48,15 +48,15 @@ static const std::string platform_create_id_string(void) {
 
 struct nfcGpioPins_t {
   std::string name;
-  std::array<uint8_t, 4> gpioPins;
+  std::array<uint8_t, 5> gpioPins;
 };
 
 static const std::array<nfcGpioPins_t,4> nfcGpioPinsPresets = {
     {
-    {"Default", {SS_PIN, SCK_PIN, MISO_PIN, MOSI_PIN}},
-    {"@lollokara's board", {6, 5, 4, 7}},
-    {"CASmo-NFC", {5, 18, 19, 23}},
-    {"CASmo-NFC-MB-ETH", {5, 14, 12, 13}}
+    {"Default", {SS_PIN, SCK_PIN, MISO_PIN, MOSI_PIN, NFC_IRQ_PIN}},
+    {"@lollokara's board", {6, 5, 4, 7, 255}},
+    {"CASmo-NFC", {5, 18, 19, 23, 255}},
+    {"CASmo-NFC-MB-ETH", {5, 14, 12, 13, 255}}
     }
 };
 
@@ -153,7 +153,7 @@ namespace espConfig
     std::string webPassword = WEB_AUTH_PASSWORD;
     bool webHttpsEnabled = false;
     uint8_t nfcPinsPreset = 255;
-    std::array<uint8_t, 4> nfcGpioPins{SS_PIN, SCK_PIN, MISO_PIN, MOSI_PIN};
+    std::array<uint8_t, 5> nfcGpioPins{SS_PIN, SCK_PIN, MISO_PIN, MOSI_PIN, NFC_IRQ_PIN};
     uint8_t btrLowStatusThreshold = BTR_PROX_BAT_LOW_THRESHOLD;
     bool proxBatEnabled = BTR_PROX_BAT_ENABLED;
     bool ethernetEnabled = ETH_ENABLED;

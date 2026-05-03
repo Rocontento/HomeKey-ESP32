@@ -5,6 +5,7 @@
 #define MISO_PIN MISO // Master In, Slave Out Pin for SPI communication
 #define MOSI_PIN MOSI // Master Out, Slave In Pin for SPI communication
 #define SCK_PIN SCK // Serial Clock Pin for SPI communication
+#define NFC_IRQ_PIN 255  // GPIO for PN532 IRQ line; 255 = not connected
 
 // MQTT Broker Settings
 #define MQTT_HOST "" //IP adress of mqtt broker
