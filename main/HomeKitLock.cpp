@@ -204,7 +204,7 @@ void HomeKitLock::initializeETH(){
 /**
  * @brief Initialize HomeSpan, expose lock-related accessories/services, and register runtime callbacks.
  *
- * Configures HomeSpan using settings from ConfigManager (pins, OTA password, port, host name suffix), initializes reader data handling, creates the lock accessory and its services/characteristics (including lock mechanism, management, NFC access, protocol/version, and optional physical battery service), installs developer debug commands, and registers controller and connection callbacks.
+ * Configures HomeSpan using settings from ConfigManager (pins, port, host name suffix), initializes reader data handling, creates the lock accessory and its services/characteristics (including lock mechanism, management, NFC access, protocol/version, and optional physical battery service), installs developer debug commands, and registers controller and connection callbacks.
  */
 void HomeKitLock::begin() {
     m_lock_state_changed = AppEventLoop::subscribe(LOCK_EVENT, LOCK_STATE_CHANGED, [&](const uint8_t* data, size_t size){
@@ -220,13 +220,19 @@ void HomeKitLock::begin() {
     const auto& app_version = esp_app_get_description()->version;
     ESP_LOGI(TAG, "Starting HomeSpan setup...");
 
+#if CONFIG_HK_REQUIRE_NONDEFAULT_SETUP
+    if (miscConfig.setupCode == "46637726") {
+        ESP_LOGE(TAG, "HomeKit setup code is the factory default. Change it via the WebUI before pairing. HomeSpan will not start.");
+        return;
+    }
+#endif
+
     if (miscConfig.controlPin != 255) homeSpan.setControlPin(miscConfig.controlPin);
     if (miscConfig.hsStatusPin != 255) homeSpan.setStatusPin(miscConfig.hsStatusPin);
     homeSpan.setStatusAutoOff(15);
     homeSpan.setLogLevel(0);
     homeSpan.setSketchVersion(app_version);
     homeSpan.enableAutoStartAP();
-    homeSpan.enableOTA(miscConfig.otaPasswd.c_str());
     homeSpan.setPortNum(1201);
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_BT);
@@ -384,9 +390,14 @@ void HomeKitLock::setupDebugCommands() {
             ESP_LOGI(TAG, "None");
         }
         for(const auto& issuer : issuers) {
+#if CONFIG_HK_DEBUG_DUMP_LTPK
              ESP_LOGI(TAG, "ID: %s, PK: %s",
                  fmt::format("{:02X}", fmt::join(issuer.issuer_id, "")).c_str(),
                  fmt::format("{:02X}", fmt::join(issuer.issuer_pk, "")).c_str());
+#else
+             ESP_LOGI(TAG, "ID: %s",
+                 fmt::format("{:02X}", fmt::join(issuer.issuer_id, "")).c_str());
+#endif
         }
         ESP_LOGI(TAG, "------------------------------------");
     });

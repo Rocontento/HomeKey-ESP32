@@ -50,7 +50,7 @@
 // Miscellaneous
 #define HOMEKEY_COLOR TAN
 #define SETUP_CODE "46637726"  // HomeKit Setup Code (only for reference, has to be changed during WiFi Configuration or from WebUI)
-#define OTA_PWD "homespan-ota" //custom password for ota
+#define AP_PASSWORD ""  // AP password: empty = generate random on first boot
 #define DEVICE_NAME "HK" //Device name
 #define HOMEKEY_ALWAYS_UNLOCK 0 // Flag indicating if a successful Homekey authentication should always set and publish the unlock state
 #define HOMEKEY_ALWAYS_LOCK 0  // Flag indicating if a successful Homekey authentication should always set and publish the lock state
@@ -121,6 +121,6 @@
 #define HK_DUMB_SWITCH_MODE true // Bypass lock state external validation
 
 // WebUI
-#define WEB_AUTH_ENABLED false
+#define WEB_AUTH_ENABLED true
 #define WEB_AUTH_USERNAME "admin"
 #define WEB_AUTH_PASSWORD "password"

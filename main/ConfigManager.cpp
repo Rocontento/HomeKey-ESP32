@@ -2,6 +2,7 @@
 #include "MbedtlsHelpers.hpp"
 #include "cJSON.h"
 #include "config.hpp"
+#include <sodium/randombytes.h>
 #include <ranges>
 #include <string>
 #include <vector>
@@ -83,9 +84,9 @@ ConfigManager::ConfigManager() : m_isInitialized(false) {
     {"misc",{
       // Miscellaneous Config
       {"deviceName", &m_miscConfig.deviceName},
-      {"otaPasswd", &m_miscConfig.otaPasswd},
       {"hk_key_color", &m_miscConfig.hk_key_color},
       {"setupCode", &m_miscConfig.setupCode},
+      {"apPassword", &m_miscConfig.apPassword},
       {"lockAlwaysUnlock", &m_miscConfig.lockAlwaysUnlock},
       {"lockAlwaysLock", &m_miscConfig.lockAlwaysLock},
       {"hkAuthPrecomputeEnabled", &m_miscConfig.hkAuthPrecomputeEnabled},
@@ -193,6 +194,15 @@ bool ConfigManager::begin() {
   loadConfigFromNvs("MQTTSSLDATA");
   loadConfigFromNvs("MISCDATA");
   loadConfigFromNvs("HTTPSDATA");
+
+  if (m_miscConfig.apPassword.empty()) {
+    uint8_t rnd[8];
+    randombytes_buf(rnd, sizeof(rnd));
+    m_miscConfig.apPassword = fmt::format("{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5], rnd[6], rnd[7]);
+    saveConfig<espConfig::misc_config_t>();
+    ESP_LOGW(TAG, "Generated AP password (first boot): %s", m_miscConfig.apPassword.c_str());
+  }
 
   ESP_LOGI(TAG, "Initialization complete.");
   return true;
@@ -860,7 +870,7 @@ std::string ConfigManager::serializeToJson() {
                 using PointeeType = std::remove_pointer_t<T>;
 
                 if constexpr (std::is_same_v<PointeeType, std::string>) {
-                    if(key.contains("Password") || key.contains("Passwd")){
+                    if(key.contains("Password") || key.contains("Passwd") || key == "setupCode"){
                         cJSON_AddStringToObject(root.get(), key.c_str(), "********");
                     } else {
                         cJSON_AddStringToObject(root.get(), key.c_str(), arg->c_str());
