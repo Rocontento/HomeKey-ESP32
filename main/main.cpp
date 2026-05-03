@@ -4,6 +4,7 @@
 #include "HomeSpan.h"
 #include "config.hpp"
 #include <esp_event.h>
+#include <esp_wifi.h>
 #include "eth_structs.hpp"
 #include "dns_server.h"
 #include "HomeKitLock.hpp"
@@ -14,6 +15,7 @@
 #include "HardwareManager.hpp"
 #include "MqttManager.hpp"
 #include "WebServerManager.hpp"
+#include "PowerManager.hpp"
 #include <functional>
 #include <sodium/crypto_sign.h>
 #include <sodium/crypto_box.h>
@@ -33,8 +35,10 @@ std::unique_ptr<HomeKitLock> homekitLock;
 std::unique_ptr<NfcManager> nfcManager;
 
 static dns_server_handle_t dns_server = NULL;
+static PowerManager s_powerManager;
 
 bool pollHS = false;
+static uint8_t s_wifiDisconnectCount = 0;
 
 static void dhcp_set_captiveportal_url(void) {
     esp_netif_ip_info_t ip_info;
@@ -74,12 +78,10 @@ std::function<void(int)> lambda = [](int status) {
     mqttManager->end();
     webServerManager->end();
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP("HomeKey-ESP32", "homekey123", 11, false, 2, false, WIFI_AUTH_WPA2_WPA3_PSK, WIFI_CIPHER_TYPE_AES_CMAC128); 
+    const std::string& apPwd = configManager->getConfig<espConfig::misc_config_t>().apPassword;
+    WiFi.softAP("HomeKey-ESP32", apPwd.c_str(), 11, false, 2, false, WIFI_AUTH_WPA2_WPA3_PSK, WIFI_CIPHER_TYPE_CCMP);
     start_captive_portal();
     webServerManager->begin();
-    while(true){
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
   }
 };
 using namespace loggable;
@@ -97,6 +99,7 @@ using namespace loggable;
  *       GPIO pin configuration based on persisted settings.
  */
 void setup() {
+  s_powerManager.begin();
   Serial.begin(115200);
   loggable::espidf::LogHook::install(false, true);
   Sinker::instance().add_sinker(std::make_shared<loggable::ConsoleLogSinker>());
@@ -171,14 +174,17 @@ void setup() {
   homekitLock->begin();
   lockManager->begin();
   WiFi.onEvent([](arduino_event_id_t event){
-    static uint8_t count = 0;
-    if(count >= 6){
+    if(s_wifiDisconnectCount >= 30){
       homeSpan.processSerialCommand("A");
-      count = 0;
+      s_wifiDisconnectCount = 0;
     } else {
-      count++;
+      s_wifiDisconnectCount++;
     }
   }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.onEvent([](arduino_event_id_t event){
+    s_wifiDisconnectCount = 0;
+    esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+  }, ARDUINO_EVENT_WIFI_STA_CONNECTED);
   pollHS = true;
 }
 

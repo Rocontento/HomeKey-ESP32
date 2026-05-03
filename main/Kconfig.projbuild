@@ -4,3 +4,13 @@ menu "Arduino Console USB-JTAG"
     bool "Output serial log via the USB/JTAG controller"
     default n
 endmenu
+
+menu "HomeKey Security"
+  config HK_REQUIRE_NONDEFAULT_SETUP
+    bool "Refuse to start HomeKit if setup code is the default"
+    default y
+
+  config HK_DEBUG_DUMP_LTPK
+    bool "Allow 'P' command to print issuer public keys (LTPK)"
+    default n
+endmenu

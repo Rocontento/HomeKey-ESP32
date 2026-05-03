@@ -139,9 +139,9 @@ namespace espConfig
   struct misc_config_t
   {
     std::string deviceName = DEVICE_NAME;
-    std::string otaPasswd = OTA_PWD;
     uint8_t hk_key_color = HOMEKEY_COLOR;
     std::string setupCode = SETUP_CODE;
+    std::string apPassword = AP_PASSWORD;
     bool lockAlwaysUnlock = HOMEKEY_ALWAYS_UNLOCK;
     bool lockAlwaysLock = HOMEKEY_ALWAYS_LOCK;
     bool hkAuthPrecomputeEnabled = HK_AUTH_PRECOMPUTE_ENABLED;

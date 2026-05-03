@@ -1,13 +1,10 @@
 #pragma once
 #include "cJSON.h"
 #include "esp_http_server.h"
-#include "esp_ota_ops.h"
-#include "esp_partition.h"
 #include "esp_timer.h"
 #include "app_event_loop.hpp"
 #include <deque>
 #include <memory>
-#include <atomic>
 #include <string>
 #include <vector>
 
@@ -82,34 +79,10 @@ private:
     WsClient(int file_descriptor) : fd(file_descriptor) {}
   };
 
-  enum class OTAUploadType { FIRMWARE, LITTLEFS };
-
-  struct OTAState {
-    esp_ota_handle_t handle = 0;
-    const esp_partition_t *updatePartition = nullptr;
-    const esp_partition_t *littlefsPartition = nullptr;
-    size_t writtenBytes = 0;
-    size_t totalBytes = 0;
-    bool skipReboot = false;
-    bool inProgress = false;
-    std::string error;
-    OTAUploadType currentUploadType = OTAUploadType::FIRMWARE;
-  };
-
-  struct OTAParams {
-    httpd_req_t *req;
-    WebServerManager *instance;
-    OTAUploadType uploadType;
-    bool skipReboot;
-    size_t contentLength;
-    OTAState *state;
-  };
-
   // ------------------------------------------------------------------------
   // Static Task Callbacks
   // ------------------------------------------------------------------------
   static void ws_send_task(void *arg);
-  static void otaTask(void *pvParameters);
   static void statusTimerCallback(void *arg);
 
   // ------------------------------------------------------------------------
@@ -127,7 +100,6 @@ private:
   static esp_err_t handleRootOrHash(httpd_req_t *req);
   static esp_err_t handleStaticFiles(httpd_req_t *req);
   static esp_err_t handleWebSocket(httpd_req_t *req);
-  static esp_err_t handleOTAUpload(httpd_req_t *req);
   static esp_err_t handleCertificateUpload(httpd_req_t *req);
   static esp_err_t handleCertificateStatus(httpd_req_t *req);
   static esp_err_t handleCertificateDelete(httpd_req_t *req);
@@ -156,9 +128,6 @@ private:
   // Device info/status
   std::string getDeviceMetrics();
   std::string getDeviceInfo();
-  std::string getOTAInfo();
-  // OTA management
-  void broadcastOTAStatus(const OTAState& state);
 
   // Utility methods
   static bool validateRequest(httpd_req_t *req, cJSON *currentData,
@@ -193,6 +162,5 @@ private:
   std::deque<std::vector<uint8_t>> m_wsBroadcastBuffer;
 
 
-  std::atomic<bool> m_otaInProgress{false};
   bool m_isInitialized{false};
 };

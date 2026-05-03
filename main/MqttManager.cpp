@@ -128,7 +128,17 @@ bool MqttManager::begin(std::string deviceID) {
     esp_mqtt_client_config_t mqtt_cfg = {};
     mqtt_cfg.broker.address.hostname = m_mqttConfig.mqttBroker.c_str();
     mqtt_cfg.broker.address.port = m_mqttConfig.mqttPort;
-    
+
+    // Refuse plaintext when no explicit insecure override
+    if (!m_mqttConfig.useSSL && !m_mqttConfig.allowInsecure) {
+        ESP_LOGW(TAG, "MQTT: SSL/TLS is disabled. Enable useSSL or set allowInsecure to connect over plain TCP.");
+    }
+    // If SSL enabled but no CA cert and not explicitly insecure, refuse
+    if (m_mqttConfig.useSSL && m_mqttSslConfig.caCert.empty() && !m_mqttConfig.allowInsecure) {
+        ESP_LOGE(TAG, "MQTT: SSL/TLS enabled but no CA certificate configured. Set allowInsecure=true or upload a CA cert.");
+        return false;
+    }
+
     if (m_mqttConfig.useSSL) {
         ESP_LOGI(TAG, "SSL/TLS is enabled for MQTT connection");
         mqtt_cfg.broker.address.transport = MQTT_TRANSPORT_OVER_SSL;
@@ -331,16 +341,16 @@ void MqttManager::onConnected() {
     publish(m_mqttConfig.lwtTopic, "online", 1, true);
 
     int ret;
-    ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockStateCmd.c_str(), 0);
+    ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockStateCmd.c_str(), 1);
     if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to lockStateCmd");
-    ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockCStateCmd.c_str(), 0);
+    ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockCStateCmd.c_str(), 1);
     if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to lockCStateCmd");
-    ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockTStateCmd.c_str(), 0);
+    ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockTStateCmd.c_str(), 1);
     if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to lockTStateCmd");
-    ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.btrLvlCmdTopic.c_str(), 0);
+    ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.btrLvlCmdTopic.c_str(), 1);
     if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to btrLvlCmdTopic");
     if (m_mqttConfig.lockEnableCustomState) {
-        ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockCustomStateCmd.c_str(), 0);
+        ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockCustomStateCmd.c_str(), 1);
         if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to lockCustomStateCmd");
     }
 
@@ -458,7 +468,7 @@ void MqttManager::publishLockState(const int currentState, const int targetState
     } else {
         stateStr = std::to_string(currentState);
     }
-    publish(m_mqttConfig.lockStateTopic, stateStr, 0, true);
+    publish(m_mqttConfig.lockStateTopic, stateStr, 1, true);
     if(m_mqttConfig.lockEnableCustomState){
       publish(m_mqttConfig.lockCustomStateTopic, (targetState == LockManager::UNLOCKED) ? std::to_string(m_mqttConfig.customLockActions.at("UNLOCK")) : std::to_string(m_mqttConfig.customLockActions.at("LOCK")));
     }

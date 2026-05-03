@@ -12,4 +12,5 @@ managed_components/
 gha-creds-*.json
 docs/public
 .direnv/
+.claude/
 build-*/
