@@ -4,3 +4,25 @@ menu "Arduino Console USB-JTAG"
     bool "Output serial log via the USB/JTAG controller"
     default n
 endmenu
+
+menu "HomeKey Security"
+
+  config HK_REQUIRE_NONDEFAULT_SETUP
+    bool "Refuse to start HomeKit if setup code is the default"
+    default y
+
+  config HK_DEBUG_DUMP_LTPK
+    bool "Allow 'P' debug command to print full LTPK (insecure)"
+    default n
+
+  config HK_ENABLE_KEYVAULT
+    bool "Protect reader_sk with HMAC-derived AES-256-GCM key (requires eFuse provisioning)"
+    default n
+    help
+      When enabled, reader_sk is encrypted with AES-256-GCM before persisting to NVS.
+      The encryption key is derived via the ESP32 HMAC peripheral from a key burned into
+      eFuse KEY_BLOCK_0 (HMAC_UP purpose). eFuse provisioning is irreversible — run
+      KeyVault::provision() once on the target device before enabling this option.
+      Devices without a provisioned eFuse key will fail to load their reader data.
+
+endmenu
