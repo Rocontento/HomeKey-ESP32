@@ -17,7 +17,7 @@
 		setupCode: '46637726',
 		hk_key_color: 0,
 		nfcPinsPreset: 0,
-		nfcGpioPins: [5, 18, 19, 23],
+		nfcGpioPins: [5, 18, 19, 23, 255],
 		ethernetEnabled: false,
 		ethActivePreset: 255,
 		ethPhyType: 0,
@@ -86,7 +86,7 @@
 		if (preset !== 255 && nfcPresets) {
 			const presetData = nfcPresets.presets[preset];
 			if (presetData) {
-				config.nfcGpioPins = [presetData.gpioPins[0], presetData.gpioPins[1], presetData.gpioPins[2], presetData.gpioPins[3]];
+				config.nfcGpioPins = [presetData.gpioPins[0], presetData.gpioPins[1], presetData.gpioPins[2], presetData.gpioPins[3], presetData.gpioPins[4] ?? 255];
 			}
 		}
 	}

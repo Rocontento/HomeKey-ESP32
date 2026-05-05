@@ -5,7 +5,7 @@
 	import { route } from 'sv-router/generated';
 
 	interface Props {
-		nfcGpioPins: [number, number, number, number];
+		nfcGpioPins: [number, number, number, number, number];
 		nfcPinsPreset: number;
 		nfcPresets: NfcGpioPinsPreset | null;
 		ethernetEnabled: boolean;
@@ -20,7 +20,7 @@
     nfcFastPollingEnabled: boolean;
 		onNfcPresetChange: (preset: number) => void;
 		onEthPresetChange: (preset: number) => void;
-		onNfcPinsChange: (pins: [number, number, number, number]) => void;
+		onNfcPinsChange: (pins: [number, number, number, number, number]) => void;
 		onEthernetToggle: (enabled: boolean) => void;
 		onEthPhyTypeChange: (phyType: number) => void;
 		onEthSpiBusChange: (bus: number) => void;
@@ -74,7 +74,7 @@
 	}
 
 	function updateNfcPin(index: number, value: number) {
-		const newPins: [number, number, number, number] = [...nfcGpioPins] as [number, number, number, number];
+		const newPins: [number, number, number, number, number] = [...nfcGpioPins] as [number, number, number, number, number];
 		newPins[index] = value;
 		onNfcPinsChange(newPins);
 	}
@@ -188,6 +188,24 @@
 					class="input input-sm input-bordered w-full"
 				/>
 			</div>
+		</div>
+		<div class="form-control mb-2">
+			<label class="label" for="nfcIrqPin">
+				<span class="label-text text-xs">IRQ Pin <span class="text-base-content/50">(255 = disabled)</span></span>
+			</label>
+			<input
+				id="nfcIrqPin"
+				type="number"
+				min="0"
+				max="255"
+				disabled={nfcPinsPreset !== 255 || loading}
+				value={nfcGpioPins[4]}
+				onchange={(e) => updateNfcPin(4, parseInt((e.target as HTMLInputElement).value, 10))}
+				class="input input-sm input-bordered w-full"
+			/>
+			<label class="label">
+				<span class="label-text-alt text-base-content/50">Connect PN532 IRQ to this GPIO for interrupt-driven polling and light sleep wakeup</span>
+			</label>
 		</div>
     <div class="flex items-center justify-between py-2 px-3 bg-base-200 rounded-lg">
       <div>

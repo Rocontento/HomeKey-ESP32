@@ -60,6 +60,7 @@
 					presetData.gpioPins[1],
 					presetData.gpioPins[2],
 					presetData.gpioPins[3],
+					presetData.gpioPins[4] ?? 255,
 				];
 			}
 		} else if (preset === 255 && misc) {

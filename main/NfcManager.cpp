@@ -1,4 +1,5 @@
 #include "NfcManager.hpp"
+#include "esp_sleep.h"
 #include "DDKReaderData.h"
 #include "ReaderDataManager.hpp"
 #include "esp32-hal.h"
@@ -280,7 +281,10 @@ bool NfcManager::begin() {
         gpio_config(&io_conf);
         gpio_install_isr_service(0);
         gpio_isr_handler_add((gpio_num_t)m_irqPin, irqIsrHandler, this);
-        ESP_LOGI(TAG, "PN532 IRQ on GPIO %d — interrupt-driven polling enabled", m_irqPin);
+        // T3.2: configure GPIO level wakeup so ESP32 exits light sleep when tag approaches
+        gpio_wakeup_enable((gpio_num_t)m_irqPin, GPIO_INTR_LOW_LEVEL);
+        esp_sleep_enable_gpio_wakeup();
+        ESP_LOGI(TAG, "PN532 IRQ on GPIO %d — interrupt-driven polling + light sleep wakeup (T3.2)", m_irqPin);
     } else {
         ESP_LOGI(TAG, "PN532 IRQ pin not configured — timer-driven polling");
     }
@@ -462,8 +466,8 @@ void NfcManager::pollingTask() {
 
         if (m_pmLockApb) esp_pm_lock_release(m_pmLockApb);
         if (m_irqPin != 255) {
-            // Release APB lock then block until IRQ fires or timeout (allows light sleep)
-            ulTaskNotifyTake(pdTRUE, pollDelayTicks * 10);
+            // APB lock released — CPU may enter light sleep; GPIO wakeup fires when tag present
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
         } else {
             vTaskDelay(pollDelayTicks);
             taskYIELD();

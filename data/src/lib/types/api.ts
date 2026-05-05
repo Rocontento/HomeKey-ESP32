@@ -91,8 +91,8 @@ export interface CaptivePortalConfig {
   hk_key_color: number;
   /** NFC GPIO pin configuration preset index */
   nfcPinsPreset: number;
-  /** NFC GPIO pin configuration [SS, SCK, MISO, MOSI] */
-  nfcGpioPins: [number, number, number, number];
+  /** NFC GPIO pin configuration [SS, SCK, MISO, MOSI, IRQ] */
+  nfcGpioPins: [number, number, number, number, number];
   /** Enable Ethernet connectivity */
   ethernetEnabled: boolean;
   /** Active Ethernet preset index */
@@ -149,8 +149,8 @@ export interface MiscConfig {
   webHttpsEnabled: boolean;
   /** NFC GPIO pin configuration preset index */
   nfcPinsPreset: number;
-  /** NFC GPIO pin configuration [pin1, pin2, pin3, pin4] */
-  nfcGpioPins: [number, number, number, number];
+  /** NFC GPIO pin configuration [SS, SCK, MISO, MOSI, IRQ] */
+  nfcGpioPins: [number, number, number, number, number];
   /** Battery low status threshold percentage */
   btrLowStatusThreshold: number;
   /** Enable proximity battery monitoring */

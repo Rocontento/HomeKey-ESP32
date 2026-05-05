@@ -10,7 +10,7 @@
 static const char* TAG = "KeyVault";
 
 static constexpr esp_efuse_block_t KEYVAULT_EFUSE_BLOCK = EFUSE_BLK_KEY0;
-static constexpr hmac_key_t        KEYVAULT_HMAC_KEY    = HMAC_KEY0;
+static constexpr hmac_key_id_t     KEYVAULT_HMAC_KEY    = HMAC_KEY0;
 
 // Domain-separation label for KEK derivation.
 static constexpr uint8_t KEK_LABEL[] = "HomeKey-Reader-KEK-v1";
