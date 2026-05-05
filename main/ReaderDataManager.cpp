@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <ranges>
 #include "msgpack.h"
+#include "KeyVault.hpp"
 
 const char* ReaderDataManager::TAG = "ReaderDataManager";
 const char* ReaderDataManager::NVS_KEY = "READERDATA";
@@ -521,12 +522,33 @@ void ReaderDataManager::unpack_hkIssuer_t(msgpack_object obj, hkIssuer_t& issuer
 void ReaderDataManager::pack_readerData_t(msgpack_packer* pk, const readerData_t& reader_data) {
     msgpack_pack_map(pk, 6); // 6 members in readerData_t
 
+#if CONFIG_HK_ENABLE_KEYVAULT
+    {
+        std::vector<uint8_t> sk_wrapped;
+        bool wrapped = !reader_data.reader_sk.empty() &&
+                       KeyVault::wrap(reader_data.reader_sk.data(), reader_data.reader_sk.size(), sk_wrapped);
+        if (wrapped) {
+            msgpack_pack_str(pk, strlen("reader_private_key_wrapped"));
+            msgpack_pack_str_body(pk, "reader_private_key_wrapped", strlen("reader_private_key_wrapped"));
+            msgpack_pack_array(pk, sk_wrapped.size());
+            for (auto b : sk_wrapped) msgpack_pack_unsigned_char(pk, b);
+        } else {
+            if (!reader_data.reader_sk.empty())
+                ESP_LOGW(TAG, "KeyVault wrap failed; storing reader_sk as plaintext");
+            msgpack_pack_str(pk, strlen("reader_private_key"));
+            msgpack_pack_str_body(pk, "reader_private_key", strlen("reader_private_key"));
+            msgpack_pack_array(pk, reader_data.reader_sk.size());
+            std::ranges::for_each(reader_data.reader_sk, [&pk](const auto&o){ msgpack_pack_unsigned_char(pk, o); });
+        }
+    }
+#else
     msgpack_pack_str(pk, strlen("reader_private_key"));
     msgpack_pack_str_body(pk, "reader_private_key", strlen("reader_private_key"));
     msgpack_pack_array(pk, reader_data.reader_sk.size());
     std::ranges::for_each(reader_data.reader_sk, [&pk](const auto&o){
       msgpack_pack_unsigned_char(pk, o);
-    });  
+    });
+#endif
 
     msgpack_pack_str(pk, strlen("reader_public_key"));
     msgpack_pack_str_body(pk, "reader_public_key", strlen("reader_public_key"));
@@ -586,6 +608,22 @@ void ReaderDataManager::unpack_readerData_t(msgpack_object obj, readerData_t& re
         }
     } 
 
+    if (obj_map.count("reader_private_key_wrapped") &&
+        obj_map["reader_private_key_wrapped"].type == MSGPACK_OBJECT_ARRAY) {
+#if CONFIG_HK_ENABLE_KEYVAULT
+        const auto& arr = obj_map["reader_private_key_wrapped"].via.array;
+        std::vector<uint8_t> wrapped(arr.size);
+        for (uint32_t i = 0; i < arr.size; ++i) wrapped[i] = static_cast<uint8_t>(arr.ptr[i].via.u64);
+        std::vector<uint8_t> plain;
+        if (KeyVault::unwrap(wrapped.data(), wrapped.size(), plain)) {
+            reader_data.reader_sk = std::move(plain);
+        } else {
+            ESP_LOGE(TAG, "KeyVault::unwrap failed — reader_sk not loaded (wrong eFuse or corrupt data)");
+        }
+#else
+        ESP_LOGE(TAG, "NVS has reader_private_key_wrapped but CONFIG_HK_ENABLE_KEYVAULT=n — reader_sk not loaded");
+#endif
+    }
     if (obj_map.count("reader_private_key") && obj_map["reader_private_key"].type == MSGPACK_OBJECT_ARRAY) {
       auto msgpack_elements = std::ranges::subrange(obj_map["reader_private_key"].via.array.ptr, obj_map["reader_private_key"].via.array.ptr + obj_map["reader_private_key"].via.array.size);
       auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});

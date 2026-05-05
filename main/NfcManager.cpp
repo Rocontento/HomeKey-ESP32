@@ -205,15 +205,16 @@ void NfcManager::authPrecomputeTask() {
  * DEBUG_AUTH_FLOW updates the debug authentication flow when received.
  *
  * @param readerDataManager Reference to the ReaderDataManager used to read and persist reader data.
- * @param nfcGpioPins Four GPIO pin numbers used to construct the PN532 SPI interface.
+ * @param nfcGpioPins Five GPIO pin numbers used to construct the PN532 SPI interface (SS, SCK, MISO, MOSI, IRQ).
  * @param hkAuthPrecomputeEnabled If true, enables HomeKit authentication precompute behavior.
  * @param nfcFastPollingEnabled If true, shortens the delay between polling iterations.
  */
 NfcManager::NfcManager(ReaderDataManager& readerDataManager,
-                       const std::array<uint8_t, 4> &nfcGpioPins,
+                       const std::array<uint8_t, 5> &nfcGpioPins,
                        bool hkAuthPrecomputeEnabled,
                        bool nfcFastPollingEnabled)
     : nfcGpioPins(nfcGpioPins),
+      m_irqPin(nfcGpioPins[4]),
       m_readerDataManager(readerDataManager),
       m_hkAuthPrecomputeEnabled(hkAuthPrecomputeEnabled),
       m_nfcFastPollingEnabled(nfcFastPollingEnabled),
@@ -268,6 +269,21 @@ bool NfcManager::begin() {
     ESP_LOGI(TAG, "Starting NFC polling task...");
     xTaskCreateUniversal(pollingTaskEntry, "nfc_poll_task", 8192, this, 2, &m_pollingTaskHandle, 1);
     esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "nfc_spi", &m_pmLockApb);
+    if (m_irqPin != 255) {
+        gpio_config_t io_conf = {
+            .pin_bit_mask = (1ULL << m_irqPin),
+            .mode         = GPIO_MODE_INPUT,
+            .pull_up_en   = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type    = GPIO_INTR_NEGEDGE,
+        };
+        gpio_config(&io_conf);
+        gpio_install_isr_service(0);
+        gpio_isr_handler_add((gpio_num_t)m_irqPin, irqIsrHandler, this);
+        ESP_LOGI(TAG, "PN532 IRQ on GPIO %d — interrupt-driven polling enabled", m_irqPin);
+    } else {
+        ESP_LOGI(TAG, "PN532 IRQ pin not configured — timer-driven polling");
+    }
     return true;
 }
 
@@ -329,6 +345,13 @@ void NfcManager::startRetryTask() {
     if (m_retryTaskHandle == nullptr) {
         xTaskCreateUniversal(retryTaskEntry, "nfc_retry_task", 4096, this, 5, &m_retryTaskHandle, 1);
     }
+}
+
+void IRAM_ATTR NfcManager::irqIsrHandler(void* arg) {
+    auto* self = static_cast<NfcManager*>(arg);
+    BaseType_t hpw = pdFALSE;
+    vTaskNotifyGiveFromISR(self->m_pollingTaskHandle, &hpw);
+    portYIELD_FROM_ISR(hpw);
 }
 
 /**
@@ -438,8 +461,13 @@ void NfcManager::pollingTask() {
         }
 
         if (m_pmLockApb) esp_pm_lock_release(m_pmLockApb);
-        vTaskDelay(pollDelayTicks);
-        taskYIELD();
+        if (m_irqPin != 255) {
+            // Release APB lock then block until IRQ fires or timeout (allows light sleep)
+            ulTaskNotifyTake(pdTRUE, pollDelayTicks * 10);
+        } else {
+            vTaskDelay(pollDelayTicks);
+            taskYIELD();
+        }
     }
 }
 

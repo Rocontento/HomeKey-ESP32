@@ -125,10 +125,10 @@ void setup() {
   static const char* TAG = "Main";
   if(miscConfig.nfcPinsPreset != PIN_UNSET){
     ESP_LOGI(TAG, "NFC GPIO pins preset: %s", nfcGpioPinsPresets[miscConfig.nfcPinsPreset].name.c_str());
-    ESP_LOGI(TAG, "NFC preset pins: %d, %d, %d, %d", nfcGpioPinsPresets[miscConfig.nfcPinsPreset].gpioPins[0], nfcGpioPinsPresets[miscConfig.nfcPinsPreset].gpioPins[1], nfcGpioPinsPresets[miscConfig.nfcPinsPreset].gpioPins[2], nfcGpioPinsPresets[miscConfig.nfcPinsPreset].gpioPins[3]);
+    ESP_LOGI(TAG, "NFC preset pins: %d, %d, %d, %d, IRQ=%d", nfcGpioPinsPresets[miscConfig.nfcPinsPreset].gpioPins[0], nfcGpioPinsPresets[miscConfig.nfcPinsPreset].gpioPins[1], nfcGpioPinsPresets[miscConfig.nfcPinsPreset].gpioPins[2], nfcGpioPinsPresets[miscConfig.nfcPinsPreset].gpioPins[3], nfcGpioPinsPresets[miscConfig.nfcPinsPreset].gpioPins[4]);
   } else {
     ESP_LOGI(TAG, "NFC GPIO pins preset: Custom");
-    ESP_LOGI(TAG, "NFC Custom GPIO pins: %d, %d, %d, %d", miscConfig.nfcGpioPins[0], miscConfig.nfcGpioPins[1], miscConfig.nfcGpioPins[2], miscConfig.nfcGpioPins[3]);
+    ESP_LOGI(TAG, "NFC Custom GPIO pins: %d, %d, %d, %d, IRQ=%d", miscConfig.nfcGpioPins[0], miscConfig.nfcGpioPins[1], miscConfig.nfcGpioPins[2], miscConfig.nfcGpioPins[3], miscConfig.nfcGpioPins[4]);
   }
   readerDataManager->begin();
   if(miscConfig.ethernetEnabled){

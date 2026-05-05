@@ -4,6 +4,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_pm.h"
+#include "driver/gpio.h"
 #include <array>
 #include <atomic>
 #include <functional>
@@ -21,7 +22,7 @@ namespace espConfig { struct misc_config_t; }
 class NfcManager {
 public:
     NfcManager(ReaderDataManager& readerDataManager,
-               const std::array<uint8_t, 4> &nfcGpioPins,
+               const std::array<uint8_t, 5> &nfcGpioPins,
                bool hkAuthPrecomputeEnabled,
                bool nfcFastPollingEnabled);
     /**
@@ -67,7 +68,9 @@ private:
     void waitForTagRemoval();
     
     // --- Member Variables ---
-    const std::array<uint8_t, 4> &nfcGpioPins;
+    const std::array<uint8_t, 5> nfcGpioPins;
+    uint8_t m_irqPin = 255;
+    static void IRAM_ATTR irqIsrHandler(void* arg);
     pn532::SpiTransport *m_pn532spi;
     pn532::Frontend *m_nfc;
 

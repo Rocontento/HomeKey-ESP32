@@ -7,6 +7,7 @@ compile_commands.json
 src/config.h
 sdkconfig*
 build/
+build-*/
 managed_components/
 .gemini/
 gha-creds-*.json
