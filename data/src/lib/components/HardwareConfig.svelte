@@ -26,6 +26,7 @@
 		onEthSpiBusChange: (bus: number) => void;
 		onEthRmiiConfigChange: (config: [number, number, number, number, number]) => void;
 		onEthSpiConfigChange: (config: [number, number, number, number, number, number, number]) => void;
+		onNfcFastPollingChange: (enabled: boolean) => void;
 	}
 
 	let {
@@ -50,6 +51,7 @@
 		onEthSpiBusChange,
 		onEthRmiiConfigChange,
 		onEthSpiConfigChange,
+		onNfcFastPollingChange,
 	}: Props = $props();
 
 	const isCaptivePortal = $derived(route.pathname.startsWith('/captive-portal'));
@@ -198,7 +200,7 @@
 				type="number"
 				min="0"
 				max="255"
-				disabled={nfcPinsPreset !== 255 || loading}
+				disabled={loading}
 				value={nfcGpioPins[4]}
 				onchange={(e) => updateNfcPin(4, parseInt((e.target as HTMLInputElement).value, 10))}
 				class="input input-sm input-bordered w-full"
@@ -214,7 +216,8 @@
       </div>
       <input
         type="checkbox"
-        bind:checked={nfcFastPollingEnabled}
+        checked={nfcFastPollingEnabled}
+        onchange={(e) => onNfcFastPollingChange((e.target as HTMLInputElement).checked)}
         class="toggle toggle-primary toggle-sm"
       />
     </div>

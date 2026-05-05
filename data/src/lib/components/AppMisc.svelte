@@ -386,6 +386,7 @@
 								onEthSpiBusChange={(bus) => miscConfig.ethSpiBus = bus}
 								onEthRmiiConfigChange={(cfg) => miscConfig.ethRmiiConfig = cfg}
 								onEthSpiConfigChange={(cfg) => miscConfig.ethSpiConfig = cfg}
+								onNfcFastPollingChange={(enabled) => miscConfig.nfcFastPollingEnabled = enabled}
 							/>
 
 							<!-- HomeSpan -->

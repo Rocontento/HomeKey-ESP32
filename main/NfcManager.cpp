@@ -1,5 +1,4 @@
 #include "NfcManager.hpp"
-#include "esp_sleep.h"
 #include "DDKReaderData.h"
 #include "ReaderDataManager.hpp"
 #include "esp32-hal.h"
@@ -266,10 +265,10 @@ bool NfcManager::begin() {
     } else {
         ESP_LOGI(TAG, "Auth precompute disabled.");
     }
+    esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "nfc_spi", &m_pmLockApb);
     ESP_LOGI(TAG, "NFC fast polling: %s", m_nfcFastPollingEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "Starting NFC polling task...");
     xTaskCreateUniversal(pollingTaskEntry, "nfc_poll_task", 8192, this, 2, &m_pollingTaskHandle, 1);
-    esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "nfc_spi", &m_pmLockApb);
     if (m_irqPin != 255) {
         gpio_config_t io_conf = {
             .pin_bit_mask = (1ULL << m_irqPin),
@@ -281,10 +280,10 @@ bool NfcManager::begin() {
         gpio_config(&io_conf);
         gpio_install_isr_service(0);
         gpio_isr_handler_add((gpio_num_t)m_irqPin, irqIsrHandler, this);
-        // T3.2: configure GPIO level wakeup so ESP32 exits light sleep when tag approaches
-        gpio_wakeup_enable((gpio_num_t)m_irqPin, GPIO_INTR_LOW_LEVEL);
-        esp_sleep_enable_gpio_wakeup();
-        ESP_LOGI(TAG, "PN532 IRQ on GPIO %d — interrupt-driven polling + light sleep wakeup (T3.2)", m_irqPin);
+        // T3.2: NEGEDGE interrupt wakes CPU from light sleep on ESP32-C6 without gpio_wakeup_enable.
+        // Do NOT call gpio_wakeup_enable(LOW_LEVEL) here — it overrides int_type to LOW_LEVEL,
+        // turning the edge ISR into a continuous level ISR that floods the notification queue.
+        ESP_LOGI(TAG, "PN532 IRQ on GPIO %d — NEGEDGE interrupt (active + light-sleep wakeup, T3.2)", m_irqPin);
     } else {
         ESP_LOGI(TAG, "PN532 IRQ pin not configured — timer-driven polling");
     }
@@ -393,7 +392,10 @@ void NfcManager::retryTaskEntry(void* instance) {
 void NfcManager::retryTask() {
     ESP_LOGI(TAG, "Starting PN532 reconnection task...");
     while (true) {
-        if (initializeReader()) {
+        if (m_pmLockApb) esp_pm_lock_acquire(m_pmLockApb);
+        bool ok = initializeReader();
+        if (m_pmLockApb) esp_pm_lock_release(m_pmLockApb);
+        if (ok) {
             ESP_LOGI(TAG, "PN532 reconnected successfully.");
             if (m_pollingTaskHandle) vTaskResume(m_pollingTaskHandle);
             m_retryTaskHandle = nullptr;
@@ -414,7 +416,10 @@ void NfcManager::retryTask() {
  * and waits for the tag to be removed before continuing normal polling.
  */
 void NfcManager::pollingTask() {
-    if (!initializeReader()) {
+    if (m_pmLockApb) esp_pm_lock_acquire(m_pmLockApb);
+    bool initialized = initializeReader();
+    if (m_pmLockApb) esp_pm_lock_release(m_pmLockApb);
+    if (!initialized) {
       startRetryTask();
       vTaskSuspend(NULL);
     }
@@ -466,8 +471,9 @@ void NfcManager::pollingTask() {
 
         if (m_pmLockApb) esp_pm_lock_release(m_pmLockApb);
         if (m_irqPin != 255) {
-            // APB lock released — CPU may enter light sleep; GPIO wakeup fires when tag present
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+            // Wait for IRQ or timeout — use same interval as non-IRQ path so rescan rate matches.
+            // IRQ fires early if PN532 detects a tag; otherwise CPU may enter light sleep until timeout.
+            ulTaskNotifyTake(pdTRUE, pollDelayTicks);
         } else {
             vTaskDelay(pollDelayTicks);
             taskYIELD();
