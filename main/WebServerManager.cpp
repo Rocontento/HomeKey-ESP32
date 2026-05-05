@@ -36,7 +36,9 @@
 #include <esp_app_desc.h>
 #include <mutex>
 #include <esp_tls_crypto.h>
+extern "C" {
 #include <mbedtls/constant_time.h>
+}
 #include <stdbool.h>
 #include <string>
 #include <thread>

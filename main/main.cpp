@@ -25,6 +25,9 @@
 #include "WebSocketLogSinker.h"
 #include "lwip/inet.h"
 
+// HomeSpan declares this symbol; defined in Arduino RainMaker which we don't use.
+extern "C" __attribute__((weak)) bool verifyRollbackLater() { return false; }
+
 std::unique_ptr<LockManager> lockManager;
 std::unique_ptr<ReaderDataManager> readerDataManager;
 std::unique_ptr<ConfigManager> configManager;
