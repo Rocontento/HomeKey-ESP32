@@ -68,6 +68,19 @@ PN7160 and PN7161 NFC controllers communicate over SPI and require two additiona
 | Configurable (e.g. GPIO4) | IRQ |
 | Configurable (e.g. GPIO16)| VEN |
 
+
+#### 2.1.2. ST25R3916 Wiring (I2C)
+
+Default pinout table for ESP32 with ST25R3916 over I2C:
+
+| ESP32 Pin | ST25R3916 Pin |
+| :-------- | :---------------- |
+| VCC/3V3   | VCC               |
+| GND       | GND               |
+| GPIO18    | SDA               |
+| GPIO5     | SCL                |
+
+
 #### 2.1.3. Integrated PCB Board Presets
 
 When using an Integrated PCB or predefined layout, select the hardware preset in the Captive Portal or WebUI:
