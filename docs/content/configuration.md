@@ -43,7 +43,7 @@ This section provides real-time information about your HomeKey-ESP32 device's op
 *   **Free Heap:** Available free heap memory in bytes.
 *   **Wi-Fi Signal:** Wi-Fi RSSI (Received Signal Strength Indicator) in dBm.
 *   **Ethernet Status:** Indicates whether Ethernet connectivity is active.
-*   **NFC Module Status:** Shows the connection status of the configured NFC module (PN532 or PN7160/PN7161). Displays active status label and diagnostic messages.
+*   **NFC Module Status:** Shows the connection status of the configured NFC module. Displays active status label and diagnostic messages.
 *   **MQTT Connection Status:** Real-time label indicating connection state (Connected, Error, Disconnected) along with specific error codes/messages if connection fails.
 
 ---
@@ -139,11 +139,12 @@ Configure GPIO pin allocations for the NFC reader, Ethernet, and HomeSpan status
     > Using strapping pins can disrupt normal ESP32 boot behavior if not handled carefully with external pull-up/pull-down resistors.
 
 #### 5.2.2. NFC Reader Configuration
-*   **Reader Type:** Select your NFC reader hardware (**PN532** over SPI, or **PN7160 / PN7161** over SPI).
+*   **Reader Type:** Select your NFC reader hardware (**PN532** over SPI, or **PN7161** over SPI).
 *   **Preset:** Select predefined hardware board presets (@lollokara, CASmo-NFC, PN7161 presets, or `Custom`).
 *   **Pin Assignments:**
     *   **PN532 (SPI):** Assign `SS Pin`, `SCK Pin`, `MISO Pin`, and `MOSI Pin`.
-    *   **PN7160 / PN7161 (SPI):** Assign SPI bus pins alongside dedicated `IRQ Pin` and `VEN Pin` (Hardware Enable/Reset).
+    *   **PN7161 (SPI):** Assign SPI bus pins (SCK, MOSI, MISO, SS) alongside dedicated `IRQ Pin` and `VEN Pin` (Hardware Enable/Reset).
+    *   **ST25R3916 (I2C)**: Assign I2C bus pins (SDA, SCL)
 *   **Fast NFC Polling:** Enables reduced delay between poll cycles for quicker tag detection.
 
 #### 5.2.3. Ethernet Configuration
@@ -151,7 +152,7 @@ Configure GPIO pin allocations for the NFC reader, Ethernet, and HomeSpan status
 *   **Board Preset & PHY Type:** Select board preset or PHY chip type (e.g., `W5500`, `LAN8720`, `IP101`).
 *   **SPI Configuration:** When using SPI Ethernet modules (like W5500), configure `SPI Bus`, `Freq (MHz)`, `CS Pin`, `IRQ Pin`, `RST Pin`, `SCK Pin`, `MISO Pin`, and `MOSI Pin`.
     > [!NOTE]
-    > When sharing an SPI bus between PN532/PN7160/PN7161 and SPI Ethernet, ensure the SCK, MISO, and MOSI pins match.
+    > When sharing an SPI bus between PN532/PN7161 and SPI Ethernet, ensure the SCK, MISO, and MOSI pins match.
 
 #### 5.2.4. HomeSpan Settings
 *   **OTA Password:** Password for HomeSpan command-line OTA updates.

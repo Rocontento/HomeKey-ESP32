@@ -22,9 +22,9 @@ First things first, let's get the brains of your HomeKey-ESP32 onto your compute
 
 ## 2. Connect Your Hardware
 
-Before flashing, you need to connect your NFC module (PN532 or PN7160 / PN7161) to your ESP32 development board.
+Before flashing, you need to connect your NFC module (PN532, PN7161 or ST25R3916) to your ESP32 development board.
 
-* **Using Jumper Wires:** If you're connecting the modules manually, refer to the [NFC Module Wiring](#21-nfc-module-wiring) section below. Ensure you connect the correct interface pins (SPI for PN532 or SPI + IRQ/VEN for PN7160/PN7161) and power (VCC/3V3, GND).
+* **Using Jumper Wires:** If you're connecting the modules manually, refer to the [NFC Module Wiring](#21-nfc-module-wiring) section below. Ensure you connect the correct interface pins (SPI for PN532, SPI + IRQ/VEN for PN7161 or I2C for ST25R3916) and power (VCC/3V3, GND).
 * **Using an Integrated PCB Board:** If you have an [Integrated PCB Board](../prerequisites#22-option-b---integrated-pcb-boards), connections are pre-wired. Simply select the corresponding hardware preset in the WebUI or Captive Portal.
 
 ### 2.1. NFC Module Wiring
@@ -53,11 +53,11 @@ Default pinout table for ESP32 with PN532 over SPI:
 | GPIO23    | MOSI      |
 | GPIO5     | SS        |
 
-#### 2.1.2. PN7160 / PN7161 Module Wiring (SPI Mode)
+#### 2.1.2. PN7161 Module Wiring (SPI Mode)
 
-PN7160 and PN7161 NFC controllers communicate over SPI and require two additional control pins: **IRQ** (Interrupt Request) and **VEN** (Enable/Reset).
+PN7161 NFC controller communicate over SPI and require two additional control pins: **IRQ** (Interrupt Request) and **VEN** (Enable/Reset).
 
-| ESP32 Pin | PN7160/PN7161 Pin |
+| ESP32 Pin | PN7161 Pin |
 | :-------- | :---------------- |
 | VCC/3V3   | VCC               |
 | GND       | GND               |
@@ -133,7 +133,7 @@ After flashing, your HomeKey-ESP32 is ready for initial configuration.
 2. **Access the Captive Portal:** If the operating system doesn't automatically open the captive portal, navigate to `http://192.168.4.1` in your web browser.
 3. **Configure Options:**
     * **Wi-Fi & HomeKit:** Scan and select Wi-Fi network, enter password, set 8-digit HomeKit pairing code, select HomeKey pass color (Tan, Gold, Silver, Black), and configure AP Access Point Password (`accessPointPassword`).
-    * **Hardware Tab:** Select NFC reader type (PN532 vs PN7161) and presets, assign custom NFC GPIO pins (including IRQ and VEN for PN7160/PN7161), configure Ethernet settings, and view strapping pin safety warnings. Override strapping pin restrictions if required by custom hardware (`overrideStrappingRestriction`).
+    * **Hardware Tab:** Select NFC reader type (PN532, PN7161 or ST25R3916) and presets, assign custom NFC GPIO pins (including IRQ and VEN for PN7161), configure Ethernet settings, and view strapping pin safety warnings. Override strapping pin restrictions if required by custom hardware (`overrideStrappingRestriction`).
 4. **Save & Connect:** Upon clicking "Save", the captive portal submits configuration diffs and connects to your Wi-Fi network. On successful connection, the interface displays the assigned network IP address before closing.
 
 ## 5. HomeKit Pairing
@@ -143,6 +143,6 @@ The default HomeKit pairing code is `466-37-726`. Once connected to your Wi-Fi n
 ## 6. Troubleshooting Common Setup Issues
 
 * **Failed to connect during flashing:** Put board into bootloader mode manually (hold BOOT, tap RESET, release BOOT).
-* **NFC Reader Not Detected:** Verify power connections and ensure DIP switch is set to SPI mode for PN532, or IRQ/VEN pins are correctly mapped for PN7160/PN7161.
+* **NFC Reader Not Detected:** Verify power connections and ensure DIP switch is set to SPI mode for PN532, or IRQ/VEN pins are correctly mapped for PN7161.
 * **Strapping Pin Warnings:** If assigning GPIOs 0, 2, 12, or 15 triggers a strapping pin conflict warning in the WebUI, verify pin usage or check `overrideStrappingRestriction` if using dedicated custom hardware.
 

@@ -37,7 +37,7 @@ The project aims to be the easy DIY solution for using Apple's HomeKey feature w
 - **ESP32 Development Board**
 - **NFC reader** - one of:
   - **PN532** (SPI)
-  - **PN7160** (SPI) - available in the dev release
+  - **PN7161** (SPI) - available in the dev release
   - **ST25R3916** (I2C) - available in the dev release
 - **USB Cable** (for flashing and power)
 - **Computer** (Windows, Mac, or Linux)

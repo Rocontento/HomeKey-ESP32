@@ -13,7 +13,7 @@ This section provides an overview of the public APIs implemented in the HomeKey-
 *   **[HomeKitLock](HomeKitLock):** HomeSpan HomeKit accessory implementation.
 *   **[LockManager](LockManager):** Lock state machine managing target vs current states.
 *   **[MqttManager](MqttManager):** Async MQTT client, TLS management, and HASS Auto-Discovery.
-*   **[NfcManager](NfcManager):** Multi-reader NFC driver (PN532 SPI & NXP PN7160/PN7161 SPI), ECP frame broadcasting, and DigitalDoorKey integration.
+*   **[NfcManager](NfcManager):** Multi-reader NFC driver (PN532 SPI, PN7161 SPI and ST25R3916 I2C), ECP frame broadcasting, and DigitalDoorKey integration.
 *   **[ReaderDataManager](ReaderDataManager):** Storage for Apple HomeKey reader keys and issuer endpoint data.
 *   **[WebServerManager](WebServerManager):** Async HTTP/HTTPS web server, Svelte 5 WebUI with `sv-router`, WebSockets, and certificate management.
 

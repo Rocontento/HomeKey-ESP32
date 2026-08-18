@@ -4,19 +4,19 @@ title: "NfcManager"
 
 ## Overview
 
-The `NfcManager` is a high-level class responsible for managing all Near Field Communication (NFC) interactions. It abstracts the low-level details of the PN532 NFC reader chip, providing a clean, event-driven interface to the rest of the application.
+The `NfcManager` is a high-level class responsible for managing all Near Field Communication (NFC) interactions. It abstracts the low-level details of the NFC reader chip, providing a clean, event-driven interface to the rest of the application.
 
 Its primary function is to continuously poll for NFC tags. When a tag is detected, it determines whether it is an Apple HomeKey-compatible device or a generic NFC tag. It then orchestrates the appropriate authentication or identification process and publishes the results as events for other components to consume. The manager is also responsible for the stability of the NFC reader, automatically handling disconnections and attempting to reconnect in the background.
 
 ## Key Responsibilities
 
-*   **NFC Reader Management:** Initializes, configures, and maintains the connection to the PN532 NFC reader.
+*   **NFC Reader Management:** Initializes, configures, and maintains the connection to the NFC reader.
 *   **Polling and Detection:** Runs a continuous background task to poll for nearby NFC tags.
 *   **Tag Type Differentiation:** Identifies whether a detected tag is a HomeKey device or a generic tag.
 *   **HomeKey Authentication:** Manages the entire HomeKey authentication flow by coordinating with the `DDKAuthenticationContext`.
 *   **Generic Tag Identification:** Reads the UID, ATQA, and SAK of non-HomeKey tags.
 *   **Event Publishing:** Publishes detailed events about NFC interactions (`NFC_TAP_EVENT`) via `AppEventLoop` to the application's event system.
-*   **Resilience:** Automatically detects if the PN532 reader becomes unresponsive and starts a background task to re-establish the connection.
+*   **Resilience:** Automatically detects if the NFC reader becomes unresponsive and starts a background task to re-establish the connection.
 
 ## Public API
 
@@ -31,12 +31,12 @@ NfcManager(ReaderDataManager& readerDataManager, const std::array<uint8_t, 4>& n
 
 **Parameters:**
 *   `readerDataManager`: A reference to the `ReaderDataManager`, which provides the necessary reader data (like the Reader GID) for HomeKey operations.
-*   `nfcGpioPins`: An array of four GPIO pin numbers required for the SPI communication with the PN532 chip.
+*   `nfcGpioPins`: An array of four GPIO pin numbers required for the SPI communication with the NFC chip.
 *   `authPrecomputeEnabled`: Whether to enable authentication precomputation for faster response times.
 
 ### begin()
 
-Initializes the PN532 hardware driver and starts the main NFC polling task. This method must be called after the constructor to begin NFC operations.
+Initializes the NFC hardware driver and starts the main NFC polling task. This method must be called after the constructor to begin NFC operations.
 
 **Signature:**
 ```cpp
@@ -53,15 +53,15 @@ The `NfcManager` operates primarily through a set of FreeRTOS tasks that run in 
 ### Polling Task (`pollingTask`)
 
 This is the main task of the `NfcManager`. It runs in an infinite loop with the following logic:
-1.  **Initialize Reader:** Attempts to initialize the PN532. If it fails, it starts the `retryTask` and suspends itself.
-2.  **Health Check:** Periodically checks if the PN532 is still responsive. If not, it starts the `retryTask` and suspends itself.
+1.  **Initialize Reader:** Attempts to initialize the NFC Module. If it fails, it starts the `retryTask` and suspends itself.
+2.  **Health Check:** Periodically checks if the NFC Module is still responsive. If not, it starts the `retryTask` and suspends itself.
 3.  **Poll for Tags:** Actively listens for a passive ISO14443A tag to enter the reader's field.
 4.  **Handle Presence:** If a tag is found, it calls `handleTagPresence()` to process it.
 5.  **Wait for Removal:** After processing, it calls `waitForTagRemoval()` to ensure the tag has left the field before polling again.
 
 ### Retry Task (`retryTask`)
 
-This task is created when the `pollingTask` detects that the PN532 is unresponsive. It runs in a loop, repeatedly trying to re-initialize the reader. Once successful, it resumes the main `pollingTask` and deletes itself. This makes the NFC functionality resilient to hardware glitches.
+This task is created when the `pollingTask` detects that the NFC Module is unresponsive. It runs in a loop, repeatedly trying to re-initialize the reader. Once successful, it resumes the main `pollingTask` and deletes itself. This makes the NFC functionality resilient to hardware glitches.
 
 ### Tag Handling
 

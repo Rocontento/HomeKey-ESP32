@@ -66,14 +66,14 @@ Generally, any board should be fine. However, some may have non-genuine modules 
 
 #### 2.1.2. NFC Reader Modules (PN532, PN7161 and ST25R3916)
 
-HomeKey-ESP32 supports **PN532**, **NXP PN7160 / PN7161**, and ST25R3916 NFC controllers.
+HomeKey-ESP32 supports **PN532**, **PN7161**, and ST25R3916 NFC controllers.
 
-*   **PN532 NFC Module:**
+*   **PN532:**
     *   **Interface:** SPI protocol.
     *   **Recommendation:** Ensure you have a PN532 module that supports SPI communication (for red Elechouse boards/clones, DIP switches must be set to `0` and `1`).
     *   Avoid long jumper wires between the module and ESP32 to maintain signal integrity.
 
-*   **PN7160 / PN7161 NFC Controllers:**
+*   **PN7161:**
     *   **Interface:** SPI protocol with dedicated **IRQ** (Interrupt Request) and **VEN** (Enable/Reset) control pins.
     *   **Features:** Enhanced Contactless Polling (ECP) support, fast tag discovery, integrated presence checks for non ISO-DEP cards, and reliable hardware performance.
         *   PN7161 has native ECP support and that is how ECP is implemented on this firmware for it, however, currently there's no fallback implemented for PN7160 which doesn't has native ECP support.

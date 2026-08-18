@@ -130,7 +130,7 @@ The server pushes the following JSON messages to all connected clients:
     *   `uptime`: System uptime in milliseconds
     *   `free_heap`: Available heap memory in bytes
     *   `wifi_rssi`: WiFi signal strength in dBm
-    *   `nfc_connected`: NFC module connection status (true if PN532 is connected and responsive)
+    *   `nfc_connected`: NFC module connection status (true if NFC Module is connected and responsive)
     *   `mqtt_connected`: MQTT broker connection status (true if connected to the MQTT broker)
     *   `mqtt_error_code`: MQTT error code when connection fails (0 = no error, 1 = connection refused, 2 = auth failed, 3 = network error, 4 = SSL error, 5 = timeout, 255 = unknown)
     *   `mqtt_error_message`: Human-readable error message when MQTT connection fails
