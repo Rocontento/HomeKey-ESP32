@@ -520,85 +520,87 @@ void MqttManager::publishUidTap(const std::vector<uint8_t>& uid, const std::arra
 void MqttManager::publishHassDiscovery() {
     ESP_LOGI(TAG, "Publishing Home Assistant discovery messages...");
 
-    cJSON *device = cJSON_CreateObject();
-    cJSON *identifiers = cJSON_CreateArray();
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_BT);
     std::string macStr = fmt::format("HK-{:02X}{:02X}{:02X}{:02X}", mac[2], mac[3], mac[4], mac[5]);
-    cJSON_AddItemToArray(identifiers, cJSON_CreateString(deviceID.c_str()));
-    cJSON_AddItemToArray(identifiers, cJSON_CreateString(macStr.c_str()));
-    cJSON_AddItemToObject(device, "identifiers", identifiers);
-    cJSON_AddStringToObject(device, "name", device_name.c_str());
-    cJSON_AddStringToObject(device, "manufacturer", "rednblkx");
-    cJSON_AddStringToObject(device, "model", "HomeKey-ESP32");
-    cJSON_AddStringToObject(device, "sw_version", esp_app_get_description()->version);
-    cJSON_AddStringToObject(device, "configuration_url", fmt::format("http://{}.local", macStr).c_str());
-    cJSON_AddStringToObject(device, "serial_number", macStr.c_str());
 
-    cJSON *lockPayload = cJSON_CreateObject();
-    cJSON_AddStringToObject(lockPayload, "name", "Lock");
-    cJSON_AddStringToObject(lockPayload, "unique_id", deviceID.c_str());
-    cJSON_AddItemToObject(lockPayload, "device", cJSON_Duplicate(device, true));
-    cJSON_AddStringToObject(lockPayload, "state_topic", m_mqttConfig.lockStateTopic.c_str());
-    cJSON_AddStringToObject(lockPayload, "command_topic", m_mqttConfig.lockTStateCmd.c_str());
-    cJSON_AddStringToObject(lockPayload, "payload_lock", std::to_string(LockManager::LOCKED).c_str());
-    cJSON_AddStringToObject(lockPayload, "payload_unlock", std::to_string(LockManager::UNLOCKED).c_str());
-    cJSON_AddStringToObject(lockPayload, "state_locked", std::to_string(LockManager::LOCKED).c_str());
-    cJSON_AddStringToObject(lockPayload, "state_unlocked", std::to_string(LockManager::UNLOCKED).c_str());
-    cJSON_AddStringToObject(lockPayload, "state_locking", std::to_string(LockManager::LOCKING).c_str());
-    cJSON_AddStringToObject(lockPayload, "state_unlocking", std::to_string(LockManager::UNLOCKING).c_str());
-    cJSON_AddStringToObject(lockPayload, "state_jammed", std::to_string(LockManager::JAMMED).c_str());
-    cJSON_AddStringToObject(lockPayload, "availability_topic", m_mqttConfig.lwtTopic.c_str());
-
-    char *payload_cstr = cJSON_Print(lockPayload);
-    std::string payload(payload_cstr);
-    free(payload_cstr);
-    std::string lockConfigTopic = "homeassistant/lock/" + m_mqttConfig.mqttClientId + "/lock/config";
-    publish(lockConfigTopic, payload, 1, true);
-    cJSON_Delete(lockPayload);
-
-    cJSON *issuerPayload = cJSON_CreateObject();
-    cJSON_AddStringToObject(issuerPayload, "name", "HomeKey Issuer");
-    cJSON_AddStringToObject(issuerPayload, "unique_id", deviceID.c_str());
-    cJSON_AddItemToObject(issuerPayload, "device", cJSON_Duplicate(device, true));
-    cJSON_AddStringToObject(issuerPayload, "topic", m_mqttConfig.hkTopic.c_str());
-    cJSON_AddStringToObject(issuerPayload, "value_template", "{{ value_json.issuerId }}");
-    char *issuerPayload_cstr = cJSON_Print(issuerPayload);
-    std::string issuerPayload_str(issuerPayload_cstr);
-    free(issuerPayload_cstr);
-    std::string issuerConfigTopic = "homeassistant/tag/" + m_mqttConfig.mqttClientId + "/hk_issuer/config";
-    publish(issuerConfigTopic, issuerPayload_str, 1, true);
-    cJSON_Delete(issuerPayload);
-
-    cJSON *endpointPayload = cJSON_CreateObject();
-    cJSON_AddStringToObject(endpointPayload, "name", "HomeKey Endpoint");
-    cJSON_AddStringToObject(endpointPayload, "unique_id", deviceID.c_str());
-    cJSON_AddItemToObject(endpointPayload, "device", cJSON_Duplicate(device, true));
-    cJSON_AddStringToObject(endpointPayload, "topic", m_mqttConfig.hkTopic.c_str());
-    cJSON_AddStringToObject(endpointPayload, "value_template", "{{ value_json.endpointId }}");
-    char *endpointPayload_cstr = cJSON_Print(endpointPayload);
-    std::string endpointPayload_str(endpointPayload_cstr);
-    free(endpointPayload_cstr);
-    std::string endpointConfigTopic = "homeassistant/tag/" + m_mqttConfig.mqttClientId + "/hk_endpoint/config";
-    publish(endpointConfigTopic, endpointPayload_str, 1, true);
-    cJSON_Delete(endpointPayload);
-
-    if (!m_mqttConfig.nfcTagNoPublish) {
-        cJSON *rfidPayload = cJSON_CreateObject();
-        cJSON_AddStringToObject(rfidPayload, "name", "NFC Tag");
-        cJSON_AddStringToObject(rfidPayload, "unique_id", deviceID.c_str());
-        cJSON_AddItemToObject(rfidPayload, "device", cJSON_Duplicate(device, true));
-        cJSON_AddStringToObject(rfidPayload, "topic", m_mqttConfig.hkTopic.c_str());
-        cJSON_AddStringToObject(rfidPayload, "value_template", "{{ value_json.uid }}");
-        char *payload_cstr = cJSON_Print(rfidPayload);
-        std::string payload(payload_cstr);
-        free(payload_cstr);
-        std::string rfidConfigTopic = "homeassistant/tag/" + m_mqttConfig.mqttClientId + "/rfid/config";
-        publish(rfidConfigTopic, payload, 1, true);
-        cJSON_Delete(rfidPayload);
+    JsonBuilder device = JsonBuilder::object();
+    if (!device) {
+        ESP_LOGE(TAG, "Failed to allocate device JSON object (OOM)");
+        return;
     }
 
-    cJSON_Delete(device);
+    JsonBuilder identifiers = JsonBuilder::array();
+    if (identifiers) {
+        identifiers.addItemToArray(JsonGuard(cJSON_CreateString(deviceID.c_str())));
+        identifiers.addItemToArray(JsonGuard(cJSON_CreateString(macStr.c_str())));
+    }
+    device.addItem("identifiers", JsonGuard(identifiers.release()));
+    
+    device.addString("name", device_name.c_str());
+    device.addString("manufacturer", "rednblkx");
+    device.addString("model", "HomeKey-ESP32");
+    device.addString("sw_version", esp_app_get_description()->version);
+    device.addString("configuration_url", fmt::format("http://{}.local", macStr).c_str());
+    device.addString("serial_number", macStr.c_str());
+
+    std::string lockedStr = std::to_string(LockManager::LOCKED);
+    std::string unlockedStr = std::to_string(LockManager::UNLOCKED);
+    std::string lockingStr = std::to_string(LockManager::LOCKING);
+    std::string unlockingStr = std::to_string(LockManager::UNLOCKING);
+    std::string jammedStr = std::to_string(LockManager::JAMMED);
+
+    auto publishConfig = [&](const char* name, const std::string& topicSuffix, auto fillPayload) {
+        JsonBuilder payload = JsonBuilder::object();
+        if (!payload) {
+            ESP_LOGE(TAG, "Failed to allocate payload JSON object (OOM)");
+            return;
+        }
+
+        payload.addString("name", name);
+        payload.addString("unique_id", deviceID.c_str());
+        payload.addItem("device", JsonGuard(cJSON_Duplicate(device.get(), true)));
+
+        fillPayload(payload);
+
+        std::string payloadStr = payload.toStringFormatted();
+        std::string topic = "homeassistant/" + topicSuffix;
+        publish(topic, payloadStr, 1, true);
+    };
+
+    // Publish Lock config
+    publishConfig("Lock", "lock/" + m_mqttConfig.mqttClientId + "/lock/config", [&](JsonBuilder& p) {
+        p.addString("state_topic", m_mqttConfig.lockStateTopic.c_str());
+        p.addString("command_topic", m_mqttConfig.lockTStateCmd.c_str());
+        p.addString("payload_lock", lockedStr.c_str());
+        p.addString("payload_unlock", unlockedStr.c_str());
+        p.addString("state_locked", lockedStr.c_str());
+        p.addString("state_unlocked", unlockedStr.c_str());
+        p.addString("state_locking", lockingStr.c_str());
+        p.addString("state_unlocking", unlockingStr.c_str());
+        p.addString("state_jammed", jammedStr.c_str());
+        p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
+    });
+
+    // Publish HomeKey Issuer config
+    publishConfig("HomeKey Issuer", "tag/" + m_mqttConfig.mqttClientId + "/hk_issuer/config", [&](JsonBuilder& p) {
+        p.addString("topic", m_mqttConfig.hkTopic.c_str());
+        p.addString("value_template", "{{ value_json.issuerId }}");
+    });
+
+    // Publish HomeKey Endpoint config
+    publishConfig("HomeKey Endpoint", "tag/" + m_mqttConfig.mqttClientId + "/hk_endpoint/config", [&](JsonBuilder& p) {
+        p.addString("topic", m_mqttConfig.hkTopic.c_str());
+        p.addString("value_template", "{{ value_json.endpointId }}");
+    });
+
+    // Publish NFC Tag config (conditional)
+    if (!m_mqttConfig.nfcTagNoPublish) {
+        publishConfig("NFC Tag", "tag/" + m_mqttConfig.mqttClientId + "/rfid/config", [&](JsonBuilder& p) {
+            p.addString("topic", m_mqttConfig.hkTopic.c_str());
+            p.addString("value_template", "{{ value_json.uid }}");
+        });
+    }
 
     ESP_LOGI(TAG, "HASS discovery messages published.");
 }
