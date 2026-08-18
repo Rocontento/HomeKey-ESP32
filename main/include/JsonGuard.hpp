@@ -123,7 +123,7 @@ public:
 }
 
 struct JsonParseError {
-    const char* message;
+    std::string message;
 };
 
 [[nodiscard]] inline std::expected<JsonGuard, JsonParseError> parse_json(std::string_view json_str) {
@@ -131,7 +131,7 @@ struct JsonParseError {
     cJSON* ptr = cJSON_Parse(str.c_str());
     if (!ptr) {
         const char* err = cJSON_GetErrorPtr();
-        return std::unexpected(JsonParseError{ err ? err : "Unknown parse error" });
+        return std::unexpected(JsonParseError{ err ? std::string(err) : "Unknown parse error" });
     }
     return JsonGuard(ptr);
 }
@@ -156,6 +156,7 @@ public:
     }
 
     [[nodiscard]] cJSON* get() const noexcept { return guard_.get(); }
+    [[nodiscard]] JsonGuard extractGuard() noexcept { return std::move(guard_); }
     
     [[nodiscard("Leaks managed cJSON object")]] cJSON* release() noexcept {
         return guard_.release();
@@ -215,14 +216,20 @@ public:
 
     JsonBuilder& addItem(const char* key, JsonGuard item) noexcept {
         if (guard_ && key && item) {
-            cJSON_AddItemToObject(guard_.get(), key, item.release());
+            cJSON* raw = item.get();
+            if (cJSON_AddItemToObject(guard_.get(), key, raw)) {
+                (void)item.release(); 
+            }
         }
         return *this;
     }
 
     JsonBuilder& addItemToArray(JsonGuard item) noexcept {
         if (guard_ && item) {
-            cJSON_AddItemToArray(guard_.get(), item.release());
+            cJSON* raw = item.get();
+            if (cJSON_AddItemToArray(guard_.get(), raw)) {
+                (void)item.release();
+            }
         }
         return *this;
     }
@@ -232,7 +239,7 @@ public:
             auto sub = JsonBuilder::object();
             if (sub) {
                 fill(sub);
-                cJSON_AddItemToObject(guard_.get(), key, sub.release());
+                addItem(key, sub.extractGuard());
             }
         }
         return *this;
@@ -243,7 +250,7 @@ public:
             auto sub = JsonBuilder::array();
             if (sub) {
                 fill(sub);
-                cJSON_AddItemToObject(guard_.get(), key, sub.release());
+                addItem(key, sub.extractGuard());
             }
         }
         return *this;
