@@ -43,6 +43,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "JsonGuard.hpp"
 
 // ============================================================================
 // Constants
@@ -62,16 +63,6 @@ static inline bool str_ends_with(const char *str, const char *suffix) {
     return false;
   size_t lenstr = strlen(str), lensuf = strlen(suffix);
   return lenstr >= lensuf && memcmp(str + lenstr - lensuf, suffix, lensuf) == 0;
-}
-
-static inline std::string cjson_to_string_and_free(cJSON *obj) {
-  if (!obj)
-    return "";
-  char *raw = cJSON_PrintUnformatted(obj);
-  std::string out = raw ? std::string(raw) : std::string{};
-  free(raw);
-  cJSON_Delete(obj);
-  return out;
 }
 
 inline constexpr const char *kNfcOwnerNames[] = {
@@ -160,10 +151,11 @@ esp_err_t WebServerManager::sendJsonError(httpd_req_t *req, const std::string &m
                                       const char *status) {
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_status(req, status);
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-  cJSON_AddItemToObject(res, "error", cJSON_CreateString(msg.c_str()));
-  httpd_resp_send(req, cjson_to_string_and_free(res).c_str(), HTTPD_RESP_USE_STRLEN);
+  std::string response = JsonBuilder::object()
+      .addBool("success", false)
+      .addString("error", msg.c_str())
+      .toStringUnformatted();
+  httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -677,55 +669,50 @@ esp_err_t WebServerManager::handleGetConfig(httpd_req_t *req) {
     return sendJsonError(req, "Missing 'type' parameter");
   }
 
-  std::string type = type_param, responseJson;
+  std::string type = type_param;
+  JsonGuard dataGuard(nullptr);
 
   if (type == "mqtt") {
-    responseJson =
-        instance->m_configManager.serializeToJson<espConfig::mqttConfig_t>();
+    std::string s = instance->m_configManager.serializeToJson<espConfig::mqttConfig_t>();
+    dataGuard.reset(cJSON_Parse(s.c_str()));
   } else if (type == "misc") {
-    responseJson =
-        instance->m_configManager.serializeToJson<espConfig::misc_config_t>();
+    std::string s = instance->m_configManager.serializeToJson<espConfig::misc_config_t>();
+    dataGuard.reset(cJSON_Parse(s.c_str()));
   } else if (type == "actions"){
-    responseJson =
-        instance->m_configManager.serializeToJson<espConfig::actions_config_t>();
+    std::string s = instance->m_configManager.serializeToJson<espConfig::actions_config_t>();
+    dataGuard.reset(cJSON_Parse(s.c_str()));
   } else if (type == "hkinfo") {
     const auto readerData = instance->m_readerDataManager.getReaderDataCopy();
-    cJSON *hkInfo = cJSON_CreateObject();
-    cJSON_AddStringToObject(
-        hkInfo, "group_identifier",
-        fmt::format("{:02X}", fmt::join(readerData.reader_gid, "")).c_str());
-    cJSON_AddStringToObject(
-        hkInfo, "unique_identifier",
-        fmt::format("{:02X}", fmt::join(readerData.reader_id, "")).c_str());
+    JsonGuard hkInfo(cJSON_CreateObject());
+    cJSON_AddStringToObject(hkInfo.get(), "group_identifier", fmt::format("{:02X}", fmt::join(readerData.reader_gid, "")).c_str());
+    cJSON_AddStringToObject(hkInfo.get(), "unique_identifier", fmt::format("{:02X}", fmt::join(readerData.reader_id, "")).c_str());
 
-    cJSON *issuersArray = cJSON_CreateArray();
+    JsonGuard issuersArray(cJSON_CreateArray());
     for (const auto &issuer : readerData.issuers) {
-      cJSON *issuerJson = cJSON_CreateObject();
-      cJSON_AddStringToObject(
-          issuerJson, "issuerId",
-          fmt::format("{:02X}", fmt::join(issuer.issuer_id, "")).c_str());
-      cJSON *endpointsArray = cJSON_CreateArray();
+      JsonGuard issuerJson(cJSON_CreateObject());
+      cJSON_AddStringToObject(issuerJson.get(), "issuerId", fmt::format("{:02X}", fmt::join(issuer.issuer_id, "")).c_str());
+      
+      JsonGuard endpointsArray(cJSON_CreateArray());
       for (const auto &endpoint : issuer.endpoints) {
-        cJSON *ep = cJSON_CreateObject();
-        cJSON_AddStringToObject(
-            ep, "endpointId",
-            fmt::format("{:02X}", fmt::join(endpoint.endpoint_id, "")).c_str());
-        cJSON_AddItemToArray(endpointsArray, ep);
+        JsonGuard ep(cJSON_CreateObject());
+        cJSON_AddStringToObject(ep.get(), "endpointId", fmt::format("{:02X}", fmt::join(endpoint.endpoint_id, "")).c_str());
+        cJSON_AddItemToArray(endpointsArray.get(), ep.release());
       }
-      cJSON_AddItemToObject(issuerJson, "endpoints", endpointsArray);
-      cJSON_AddItemToArray(issuersArray, issuerJson);
+      cJSON_AddItemToObject(issuerJson.get(), "endpoints", endpointsArray.release());
+      cJSON_AddItemToArray(issuersArray.get(), issuerJson.release());
     }
-    cJSON_AddItemToObject(hkInfo, "issuers", issuersArray);
-    responseJson = cjson_to_string_and_free(hkInfo);
+    cJSON_AddItemToObject(hkInfo.get(), "issuers", issuersArray.release());
+    dataGuard = std::move(hkInfo);
   } else {
     return sendJsonError(req, "Invalid 'type' parameter");
   }
 
   httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
-  cJSON_AddItemToObject(res, "data", cJSON_Parse(responseJson.c_str()));
-  std::string response = cjson_to_string_and_free(res);
+  std::string response = JsonBuilder::object()
+      .addBool("success", true)
+      .addItem("data", std::move(dataGuard))
+      .toStringUnformatted();
+  
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
@@ -740,25 +727,25 @@ esp_err_t WebServerManager::handleGetNfcPresets(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-  cJSON *response = cJSON_CreateObject();
-  cJSON *presetsArray = cJSON_CreateArray();
-  for (auto &&v : nfcGpioPinsPresets) {
-    cJSON *preset = cJSON_CreateObject();
-    cJSON_AddStringToObject(preset, "name", v.name.c_str());
-    cJSON_AddNumberToObject(preset, "type", v.type);
-    cJSON* gpioArray = cJSON_AddArrayToObject(preset, "gpioPins");
-    for (auto &&pin : v.gpioPins) {
-      cJSON_AddItemToArray(gpioArray, cJSON_CreateNumber(pin));
+  JsonBuilder response = JsonBuilder::object();
+  response.withArray("presets", [&](JsonBuilder& presetsArray) {
+    for (auto &&v : nfcGpioPinsPresets) {
+      JsonBuilder preset = JsonBuilder::object();
+      preset.addString("name", v.name.c_str());
+      preset.addNumber("type", v.type);
+      preset.withArray("gpioPins", [&](JsonBuilder& gpioArray) {
+        for (auto &&pin : v.gpioPins) {
+          gpioArray.addItemToArray(JsonGuard(cJSON_CreateNumber(pin)));
+        }
+      });
+      preset.addNumber("irqPin", v.irqPin);
+      preset.addNumber("venPin", v.venPin);
+      presetsArray.addItemToArray(std::move(preset).release());
     }
-    cJSON_AddNumberToObject(preset, "irqPin", v.irqPin);
-    cJSON_AddNumberToObject(preset, "venPin", v.venPin);
-    cJSON_AddItemToArray(presetsArray, preset);
-  }
-  cJSON *nfcPresets = cJSON_CreateObject();
-  cJSON_AddItemToObject(nfcPresets, "presets", presetsArray);
-  cJSON_AddItemToObject(response, "data", nfcPresets);
-  cJSON_AddItemToObject(response, "success", cJSON_CreateBool(true));
-  std::string resp = cjson_to_string_and_free(response);
+  });
+  response.addBool("success", true);
+
+  std::string resp = response.toStringUnformatted();
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, resp.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
@@ -774,69 +761,66 @@ esp_err_t WebServerManager::handleGetEthConfig(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-  cJSON *eth_config = cJSON_CreateObject();
+  JsonBuilder eth_config = JsonBuilder::object();
 
   // Supported chips
-  cJSON *chipsArray = cJSON_CreateArray();
-  for (auto &&v : eth_config_ns::supportedChips) {
-    cJSON *chip = cJSON_CreateObject();
-    cJSON_AddStringToObject(chip, "name", v.second.name.c_str());
-    cJSON_AddBoolToObject(chip, "emac", v.second.emac);
-    cJSON_AddNumberToObject(chip, "phy_type", v.second.phy_type);
-    cJSON_AddItemToArray(chipsArray, chip);
-  }
-  cJSON_AddItemToObject(eth_config, "supportedChips", chipsArray);
+  eth_config.withArray("supportedChips", [&](JsonBuilder& chipsArray) {
+    for (auto &&v : eth_config_ns::supportedChips) {
+      JsonBuilder chip = JsonBuilder::object();
+      chip.addString("name", v.second.name.c_str());
+      chip.addBool("emac", v.second.emac);
+      chip.addNumber("phy_type", v.second.phy_type);
+      chipsArray.addItemToArray(std::move(chip).release());
+    }
+  });
 
   // Board presets
-  cJSON *boardPresetsArray = cJSON_CreateArray();
-  for (auto &&v : eth_config_ns::boardPresets) {
-    cJSON *preset = cJSON_CreateObject();
-    cJSON_AddStringToObject(preset, "name", v.name.c_str());
+  eth_config.withArray("boardPresets", [&](JsonBuilder& boardPresetsArray) {
+    for (auto &&v : eth_config_ns::boardPresets) {
+      JsonBuilder preset = JsonBuilder::object();
+      preset.addString("name", v.name.c_str());
 
-    cJSON *chip = cJSON_CreateObject();
-    cJSON_AddStringToObject(chip, "name", v.ethChip.name.c_str());
-    cJSON_AddBoolToObject(chip, "emac", v.ethChip.emac);
-    cJSON_AddNumberToObject(chip, "phy_type", v.ethChip.phy_type);
-    cJSON_AddItemToObject(preset, "ethChip", chip);
-    if(v.ethChip.emac){
+      preset.withObject("ethChip", [&](JsonBuilder& chip) {
+        chip.addString("name", v.ethChip.name.c_str());
+        chip.addBool("emac", v.ethChip.emac);
+        chip.addNumber("phy_type", v.ethChip.phy_type);
+      });
+
+      if(v.ethChip.emac){
 #if CONFIG_ETH_USE_ESP32_EMAC
-    cJSON *rmii_conf = cJSON_CreateObject();
-    cJSON_AddNumberToObject(rmii_conf, "phy_addr", v.rmii_conf.phy_addr);
-    cJSON_AddNumberToObject(rmii_conf, "pin_mcd", v.rmii_conf.pin_mcd);
-    cJSON_AddNumberToObject(rmii_conf, "pin_mdio", v.rmii_conf.pin_mdio);
-    cJSON_AddNumberToObject(rmii_conf, "pin_power", v.rmii_conf.pin_power);
-    cJSON_AddNumberToObject(rmii_conf, "pin_rmii_clock",
-                            v.rmii_conf.pin_rmii_clock);
-    cJSON_AddItemToObject(preset, "rmii_conf", rmii_conf);
+        preset.withObject("rmii_conf", [&](JsonBuilder& rmii_conf) {
+          rmii_conf.addNumber("phy_addr", v.rmii_conf.phy_addr);
+          rmii_conf.addNumber("pin_mcd", v.rmii_conf.pin_mcd);
+          rmii_conf.addNumber("pin_mdio", v.rmii_conf.pin_mdio);
+          rmii_conf.addNumber("pin_power", v.rmii_conf.pin_power);
+          rmii_conf.addNumber("pin_rmii_clock", v.rmii_conf.pin_rmii_clock);
+        });
 #endif
-    } else {
-      cJSON *spi_conf = cJSON_CreateObject();
-      cJSON_AddNumberToObject(spi_conf, "spi_freq_mhz", v.spi_conf.spi_freq_mhz);
-      cJSON_AddNumberToObject(spi_conf, "pin_cs", v.spi_conf.pin_cs);
-      cJSON_AddNumberToObject(spi_conf, "pin_irq", v.spi_conf.pin_irq);
-      cJSON_AddNumberToObject(spi_conf, "pin_rst", v.spi_conf.pin_rst);
-      cJSON_AddNumberToObject(spi_conf, "pin_sck", v.spi_conf.pin_sck);
-      cJSON_AddNumberToObject(spi_conf, "pin_miso", v.spi_conf.pin_miso);
-      cJSON_AddNumberToObject(spi_conf, "pin_mosi", v.spi_conf.pin_mosi);
-      cJSON_AddItemToObject(preset, "spi_conf", spi_conf);
+      } else {
+        preset.withObject("spi_conf", [&](JsonBuilder& spi_conf) {
+          spi_conf.addNumber("spi_freq_mhz", v.spi_conf.spi_freq_mhz);
+          spi_conf.addNumber("pin_cs", v.spi_conf.pin_cs);
+          spi_conf.addNumber("pin_irq", v.spi_conf.pin_irq);
+          spi_conf.addNumber("pin_rst", v.spi_conf.pin_rst);
+          spi_conf.addNumber("pin_sck", v.spi_conf.pin_sck);
+          spi_conf.addNumber("pin_miso", v.spi_conf.pin_miso);
+          spi_conf.addNumber("pin_mosi", v.spi_conf.pin_mosi);
+        });
+      }
+      boardPresetsArray.addItemToArray(std::move(preset).release());
     }
-    cJSON_AddItemToArray(boardPresetsArray, preset);
-  }
-  cJSON_AddItemToObject(eth_config, "boardPresets", boardPresetsArray);
-  cJSON_AddBoolToObject(
-      eth_config, "ethEnabled",
-      instance->m_configManager.getConfig<espConfig::misc_config_t>()
-          .ethernetEnabled);
+  });
 
-  cJSON_AddNumberToObject(eth_config, "numSpiBuses", SPI_HOST_MAX - 1);
+  eth_config.addBool("ethEnabled", instance->m_configManager.getConfig<espConfig::misc_config_t>().ethernetEnabled);
+  eth_config.addNumber("numSpiBuses", SPI_HOST_MAX - 1);
 
-  std::string payload = cjson_to_string_and_free(eth_config);
   httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
-  cJSON_AddItemToObject(res, "data", cJSON_Parse(payload.c_str()));
-  std::string response = cjson_to_string_and_free(res);
-  httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
+  JsonBuilder response = JsonBuilder::object();
+  response.addBool("success", true);
+  response.addItem("data", std::move(eth_config).release());
+  
+  std::string resp = response.toStringUnformatted();
+  httpd_resp_send(req, resp.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -864,8 +848,7 @@ esp_err_t WebServerManager::handleSaveConfig(httpd_req_t *req) {
 
   char query[256], type_param[64];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-      httpd_query_key_value(query, "type", type_param, sizeof(type_param)) !=
-          ESP_OK) {
+      httpd_query_key_value(query, "type", type_param, sizeof(type_param)) != ESP_OK) {
     return sendJsonError(req, "Missing 'type' parameter");
   }
 
@@ -877,57 +860,50 @@ esp_err_t WebServerManager::handleSaveConfig(httpd_req_t *req) {
   std::vector<char> content(max_content_size, 0);
   int ret = httpd_req_recv(req, content.data(), content.size() - 1);
   if (ret <= 0) {
-    // recv itself failed — the socket may already be broken, so let the
-    // framework close it rather than risk sending on a dead connection.
     return ESP_FAIL;
   }
   content[ret] = '\0';
 
-  cJSON *obj = cJSON_Parse(content.data());
+  JsonGuard obj(cJSON_Parse(content.data()));
   if (!obj) {
     instance->sendJsonError(req, "Invalid JSON");
     return ESP_OK;
   }
 
   std::string type = type_param;
-  cJSON *configSchema = nullptr;
+  JsonGuard configSchema(nullptr);
 
   if (type == "mqtt") {
-    std::string s =
-        instance->m_configManager.serializeToJson<espConfig::mqttConfig_t>();
-    configSchema = cJSON_Parse(s.c_str());
+    std::string s = instance->m_configManager.serializeToJson<espConfig::mqttConfig_t>();
+    configSchema.reset(cJSON_Parse(s.c_str()));
   } else if (type == "misc") {
-    std::string s =
-        instance->m_configManager.serializeToJson<espConfig::misc_config_t>();
-    configSchema = cJSON_Parse(s.c_str());
+    std::string s = instance->m_configManager.serializeToJson<espConfig::misc_config_t>();
+    configSchema.reset(cJSON_Parse(s.c_str()));
   } else if (type == "actions") {
-    std::string s =
-        instance->m_configManager.serializeToJson<espConfig::actions_config_t>();
-    configSchema = cJSON_Parse(s.c_str());
+    std::string s = instance->m_configManager.serializeToJson<espConfig::actions_config_t>();
+    configSchema.reset(cJSON_Parse(s.c_str()));
   } else {
-    cJSON_Delete(obj);
     return sendJsonError(req, "Invalid 'type' parameter");
   }
 
-  if (!validateRequest(req, configSchema, obj)) {
-    cJSON_Delete(configSchema);
-    cJSON_Delete(obj);
-    return ESP_OK;   // validateRequest already sent a full error response
+  if (!validateRequest(req, configSchema.get(), obj.get())) {
+    return ESP_OK; // validateRequest already sent a full error response
   }
 
   bool success = false, rebootNeeded = false;
   std::string rebootMsg, errorMsg;
 
-  cJSON *it = obj->child;
+  cJSON *it = obj.get()->child;
   if (it == NULL) {
-    cJSON_Delete(configSchema);
-    cJSON_Delete(obj);
     return sendJsonError(req, "Received empty object, nothing to save");
   }
-  char *data_str = cJSON_PrintUnformatted(obj);
+  
+  // Safe string representation that cleans itself up
+  std::string data_str = to_string_unformatted(obj);
   std::string result;
+  
   while (it) {
-    cJSON *configSchemaItem = cJSON_GetObjectItem(configSchema, it->string);
+    cJSON *configSchemaItem = cJSON_GetObjectItem(configSchema.get(), it->string);
     if (cJSON_Compare(it, configSchemaItem, true)) {
       it = it->next;
       continue;
@@ -939,8 +915,7 @@ esp_err_t WebServerManager::handleSaveConfig(httpd_req_t *req) {
       EventValueChanged s{.name = keyStr, .str = it->valuestring};
       std::vector<uint8_t> d;
       alpaca::serialize(s, d);
-      HomekitEvent event{.type = HomekitEventType::SETUP_CODE_CHANGED,
-                         .data = d};
+      HomekitEvent event{.type = HomekitEventType::SETUP_CODE_CHANGED, .data = d};
       std::vector<uint8_t> event_data;
       alpaca::serialize(event, event_data);
       AppEventLoop::publish(HK_EVENT, HK_INTERNAL_EVENT, event_data.data(), event_data.size());
@@ -948,18 +923,15 @@ esp_err_t WebServerManager::handleSaveConfig(httpd_req_t *req) {
       rebootNeeded = true;
       rebootMsg = "Pixel GPIO pin changed, reboot needed! Rebooting...";
     } else if (str_ends_with(keyStr.c_str(), "Pin")) {
-      EventValueChanged s{.name = keyStr,
-                          .oldValue = (uint8_t)configSchemaItem->valueint,
-                          .newValue = (uint8_t)it->valueint};
+      EventValueChanged s{.name = keyStr, .oldValue = (uint8_t)configSchemaItem->valueint, .newValue = (uint8_t)it->valueint};
       std::vector<uint8_t> d;
       alpaca::serialize(s, d);
       AppEventLoop::publish(HW_EVENT, HW_CONFIG_CHANGED, d.data(), d.size());
-      if (keyStr == "gpioActionPin" && it->valueint != 255 && cJSON_IsTrue(cJSON_GetObjectItem(configSchema, "hkDumbSwitchMode"))) {
-        cJSON_AddBoolToObject(obj, "hkDumbSwitchMode",false);
+      if (keyStr == "gpioActionPin" && it->valueint != 255 && cJSON_IsTrue(cJSON_GetObjectItem(configSchema.get(), "hkDumbSwitchMode"))) {
+        cJSON_AddBoolToObject(obj.get(), "hkDumbSwitchMode", false);
       }
     } else if (keyStr == "btrLowStatusThreshold") {
-      EventValueChanged s{.name = "btrLowThreshold",
-                          .newValue = (uint8_t)it->valueint};
+      EventValueChanged s{.name = "btrLowThreshold", .newValue = (uint8_t)it->valueint};
       std::vector<uint8_t> d;
       alpaca::serialize(s, d);
       HomekitEvent event{.type = HomekitEventType::BTR_PROP_CHANGED, .data = d};
@@ -983,49 +955,43 @@ esp_err_t WebServerManager::handleSaveConfig(httpd_req_t *req) {
   } else if (type == "misc") {
     result = instance->m_configManager.updateFromJson<espConfig::misc_config_t>(data_str);
     if (!result.empty()) {
-      success =
-          instance->m_configManager.saveConfig<espConfig::misc_config_t>();
+      success = instance->m_configManager.saveConfig<espConfig::misc_config_t>();
       rebootNeeded = true;
       rebootMsg = "Misc config saved, reboot needed! Rebooting...";
     }
   } else if (type == "actions") {
     result = instance->m_configManager.updateFromJson<espConfig::actions_config_t>(data_str);
     if (!result.empty()) {
-      success =
-          instance->m_configManager.saveConfig<espConfig::actions_config_t>();
+      success = instance->m_configManager.saveConfig<espConfig::actions_config_t>();
     }
   }
 
-  cJSON_free(data_str);
-  cJSON_Delete(configSchema);
-  cJSON_Delete(obj);
-
+  httpd_resp_set_type(req, "application/json");
   if (success) {
-    httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
-    cJSON_AddItemToObject(res, "message", cJSON_CreateString(rebootNeeded ? rebootMsg.c_str() : "Saved and applied!"));
-    cJSON_AddItemToObject(res, "data", cJSON_Parse(result.c_str()));
-    std::string response = cjson_to_string_and_free(res);
+    JsonBuilder res = JsonBuilder::object();
+    res.addBool("success", true);
+    res.addString("message", rebootNeeded ? rebootMsg.c_str() : "Saved and applied!");
+    JsonGuard dataPtr(cJSON_Parse(result.c_str()));
+    res.addItem("data", std::move(dataPtr));
+    
+    std::string response = res.toStringUnformatted();
     httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
     if (rebootNeeded) {
       vTaskDelay(pdMS_TO_TICKS(1000));
       esp_restart();
     }
-    return ESP_OK;
+  } else {
+    JsonBuilder res = JsonBuilder::object();
+    res.addBool("success", false);
+    res.addString("error", errorMsg.empty() ? "Unable to save config!" : errorMsg.c_str());
+    httpd_resp_set_status(req, HTTPD_500);
+    std::string response = res.toStringUnformatted();
+    httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   }
-  httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-  cJSON_AddItemToObject(res, "error", cJSON_CreateString(errorMsg.empty() ? "Unable to save config!" : errorMsg.c_str()));
-  httpd_resp_set_status(req, HTTPD_500);
-  std::string response = cjson_to_string_and_free(res);
-  httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
-bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData,
-                                       cJSON *obj) {
+bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData, cJSON *obj) {
   bool overrideStrapping = false;
   cJSON *ovrStrItem = cJSON_GetObjectItem(obj, "overrideStrappingRestriction");
   if (!ovrStrItem) ovrStrItem = cJSON_GetObjectItem(currentData, "overrideStrappingRestriction");
@@ -1033,8 +999,7 @@ bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData,
   if (ovrStrItem) {
     overrideStrapping = cJSON_IsBool(ovrStrItem) && cJSON_IsTrue(ovrStrItem);
   } else {
-    overrideStrapping = getInstance(req)->m_configManager
-        .getConfig<espConfig::misc_config_t>().overrideStrappingRestriction;
+    overrideStrapping = getInstance(req)->m_configManager.getConfig<espConfig::misc_config_t>().overrideStrappingRestriction;
   }
 
   cJSON *it = obj->child;
@@ -1048,7 +1013,6 @@ bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData,
       return false;
     }
 
-    // Type validation
     cJSON *incomingValue = it;
     bool typeOk = false;
     if (cJSON_IsString(existingValue))
@@ -1066,9 +1030,8 @@ bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData,
 
     if (!typeOk) {
       char *valueStr = cJSON_PrintUnformatted(incomingValue);
-      std::string msg = "Invalid type for key \"" + keyStr +
-                        "\". Received: " + std::string(valueStr);
-      free(valueStr);
+      std::unique_ptr<char, decltype(&cJSON_free)> valueStrGuard(valueStr, &cJSON_free);
+      std::string msg = "Invalid type for key \"" + keyStr + "\". Received: " + std::string(valueStr ? valueStr : "null");
       sendJsonError(req, msg);
       return false;
     }
@@ -1238,14 +1201,13 @@ esp_err_t WebServerManager::handleClearConfig(httpd_req_t *req) {
 
   char query[256], type_param[64];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-      httpd_query_key_value(query, "type", type_param, sizeof(type_param)) !=
-          ESP_OK) {
+      httpd_query_key_value(query, "type", type_param, sizeof(type_param)) != ESP_OK) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_status(req, "400 Bad Request");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("Missing 'type' parameter"));
-    std::string response = cjson_to_string_and_free(res);
+    std::string response = JsonBuilder::object()
+        .addBool("success", false)
+        .addString("error", "Missing 'type' parameter")
+        .toStringUnformatted();
     httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
     return ESP_FAIL;
   }
@@ -1289,10 +1251,10 @@ esp_err_t WebServerManager::handleHKReset(httpd_req_t *req) {
     return ESP_FAIL;
   }
   httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
-  cJSON_AddItemToObject(res, "message", cJSON_CreateString("Erasing HomeKit pairings, device will reboot"));
-  std::string response = cjson_to_string_and_free(res);
+  std::string response = JsonBuilder::object()
+      .addBool("success", true)
+      .addString("message", "Erasing HomeKit pairings, device will reboot")
+      .toStringUnformatted();
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   instance->m_readerDataManager.deleteAllReaderData();
   homeSpan.processSerialCommand("H");
@@ -1305,10 +1267,10 @@ esp_err_t WebServerManager::handleWifiReset(httpd_req_t *req) {
     return sendAuthFailure(req);
   }
   httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
-  cJSON_AddItemToObject(res, "message", cJSON_CreateString("Erasing WiFi credentials, device will reboot"));
-  std::string response = cjson_to_string_and_free(res);
+  std::string response = JsonBuilder::object()
+      .addBool("success", true)
+      .addString("message", "Erasing WiFi credentials, device will reboot")
+      .toStringUnformatted();
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   homeSpan.processSerialCommand("X");
   return ESP_OK;
@@ -1320,10 +1282,10 @@ esp_err_t WebServerManager::handleStartConfigAP(httpd_req_t *req) {
     return sendAuthFailure(req);
   }
   httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
-  cJSON_AddItemToObject(res, "message", cJSON_CreateString("Starting AP mode..."));
-  std::string response = cjson_to_string_and_free(res);
+  std::string response = JsonBuilder::object()
+      .addBool("success", true)
+      .addString("message", "Starting AP mode...")
+      .toStringUnformatted();
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   vTaskDelay(pdMS_TO_TICKS(1000));
   std::jthread j([](){
@@ -1353,46 +1315,45 @@ esp_err_t WebServerManager::handleGetCaptivePortalConfig(httpd_req_t *req) {
 
   const auto &miscConfig = instance->m_configManager.getConfig<espConfig::misc_config_t>();
 
-  cJSON *config = cJSON_CreateObject();
-  cJSON_AddStringToObject(config, "setupCode", miscConfig.setupCode.c_str());
-  cJSON_AddNumberToObject(config, "hk_key_color", miscConfig.hk_key_color);
+  JsonBuilder config = JsonBuilder::object();
+  config.addString("setupCode", miscConfig.setupCode.c_str());
+  config.addNumber("hk_key_color", miscConfig.hk_key_color);
+  config.addNumber("nfcPinsPreset", miscConfig.nfcPinsPreset);
+  
+  config.withArray("nfcGpioPins", [&](JsonBuilder& arr) {
+    for (auto &&pin : miscConfig.nfcGpioPins) {
+      arr.addItemToArray(JsonGuard(cJSON_CreateNumber(pin)));
+    }
+  });
+  
+  config.addNumber("nfcReaderType", miscConfig.nfcReaderType);
+  config.addNumber("nfcIrqPin", miscConfig.nfcIrqPin);
+  config.addNumber("nfcVenPin", miscConfig.nfcVenPin);
+  config.addBool("ethernetEnabled", miscConfig.ethernetEnabled);
+  config.addNumber("ethActivePreset", miscConfig.ethActivePreset);
+  config.addNumber("ethPhyType", miscConfig.ethPhyType);
+  config.addNumber("ethSpiBus", miscConfig.ethSpiBus);
 
-  // NFC GPIO pins
-  cJSON_AddNumberToObject(config, "nfcPinsPreset", miscConfig.nfcPinsPreset);
-  cJSON *nfcGpioPins = cJSON_CreateArray();
-  for (auto &&pin : miscConfig.nfcGpioPins) {
-    cJSON_AddItemToArray(nfcGpioPins, cJSON_CreateNumber(pin));
-  }
-  cJSON_AddItemToObject(config, "nfcGpioPins", nfcGpioPins);
-  cJSON_AddNumberToObject(config, "nfcReaderType", miscConfig.nfcReaderType);
-  cJSON_AddNumberToObject(config, "nfcIrqPin", miscConfig.nfcIrqPin);
-  cJSON_AddNumberToObject(config, "nfcVenPin", miscConfig.nfcVenPin);
+  config.withArray("ethRmiiConfig", [&](JsonBuilder& arr) {
+    for (auto &&val : miscConfig.ethRmiiConfig) {
+      arr.addItemToArray(JsonGuard(cJSON_CreateNumber(val)));
+    }
+  });
 
-  // Ethernet configuration
-  cJSON_AddBoolToObject(config, "ethernetEnabled", miscConfig.ethernetEnabled);
-  cJSON_AddNumberToObject(config, "ethActivePreset", miscConfig.ethActivePreset);
-  cJSON_AddNumberToObject(config, "ethPhyType", miscConfig.ethPhyType);
-  cJSON_AddNumberToObject(config, "ethSpiBus", miscConfig.ethSpiBus);
+  config.withArray("ethSpiConfig", [&](JsonBuilder& arr) {
+    for (auto &&val : miscConfig.ethSpiConfig) {
+      arr.addItemToArray(JsonGuard(cJSON_CreateNumber(val)));
+    }
+  });
 
-  cJSON *ethRmiiConfig = cJSON_CreateArray();
-  for (auto &&val : miscConfig.ethRmiiConfig) {
-    cJSON_AddItemToArray(ethRmiiConfig, cJSON_CreateNumber(val));
-  }
-  cJSON_AddItemToObject(config, "ethRmiiConfig", ethRmiiConfig);
+  config.addBool("overrideStrappingRestriction", miscConfig.overrideStrappingRestriction);
+  config.addBool("nfcFastPollingEnabled", miscConfig.nfcFastPollingEnabled);
 
-  cJSON *ethSpiConfig = cJSON_CreateArray();
-  for (auto &&val : miscConfig.ethSpiConfig) {
-    cJSON_AddItemToArray(ethSpiConfig, cJSON_CreateNumber(val));
-  }
-  cJSON_AddItemToObject(config, "ethSpiConfig", ethSpiConfig);
-
-  cJSON_AddBoolToObject(config, "overrideStrappingRestriction", miscConfig.overrideStrappingRestriction);
-  cJSON_AddBoolToObject(config, "nfcFastPollingEnabled", miscConfig.nfcFastPollingEnabled);
   httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
-  cJSON_AddItemToObject(res, "data", config);
-  std::string response = cjson_to_string_and_free(res);
+  std::string response = JsonBuilder::object()
+      .addBool("success", true)
+      .addItem("data", std::move(config).release())
+      .toStringUnformatted();
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
@@ -1439,10 +1400,10 @@ esp_err_t WebServerManager::handleSaveCaptivePortalConfig(httpd_req_t *req) {
   if (req->content_len >= max_content_size) {
     httpd_resp_set_status(req, "413 Payload Too Large");
     httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("Request body too large"));
-    std::string response = cjson_to_string_and_free(res);
+    std::string response = JsonBuilder::object()
+        .addBool("success", false)
+        .addString("error", "Request body too large")
+        .toStringUnformatted();
     httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
     return ESP_FAIL;
   }
@@ -1452,23 +1413,23 @@ esp_err_t WebServerManager::handleSaveCaptivePortalConfig(httpd_req_t *req) {
   if (ret <= 0) {
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("Invalid request body"));
-    std::string response = cjson_to_string_and_free(res);
+    std::string response = JsonBuilder::object()
+        .addBool("success", false)
+        .addString("error", "Invalid request body")
+        .toStringUnformatted();
     httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
     return ESP_FAIL;
   }
   content[ret] = '\0';
 
-  cJSON *obj = cJSON_Parse(content.data());
+  JsonGuard obj(cJSON_Parse(content.data()));
   if (!obj) {
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("Invalid JSON"));
-    std::string response = cjson_to_string_and_free(res);
+    std::string response = JsonBuilder::object()
+        .addBool("success", false)
+        .addString("error", "Invalid JSON")
+        .toStringUnformatted();
     httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
     return ESP_FAIL;
   }
@@ -1479,100 +1440,91 @@ esp_err_t WebServerManager::handleSaveCaptivePortalConfig(httpd_req_t *req) {
   bool wifiProvided = false;
   bool hasSetupCode = false;
 
-  cJSON *ssidItem = cJSON_GetObjectItem(obj, "wifiSsid");
-  cJSON *passwordItem = cJSON_GetObjectItem(obj, "wifiPassword");
+  cJSON *ssidItem = cJSON_GetObjectItem(obj.get(), "wifiSsid");
+  cJSON *passwordItem = cJSON_GetObjectItem(obj.get(), "wifiPassword");
   if (ssidItem && cJSON_IsString(ssidItem)) {
     ssid = ssidItem->valuestring;
-    if (!ssid.empty()) {
-      wifiProvided = true;
-    }
+    if (!ssid.empty()) wifiProvided = true;
   }
   if (passwordItem && cJSON_IsString(passwordItem)) {
     password = passwordItem->valuestring;
   }
 
-  cJSON_DeleteItemFromObject(obj, "wifiSsid");
-  cJSON_DeleteItemFromObject(obj, "wifiPassword");
+  cJSON_DeleteItemFromObject(obj.get(), "wifiSsid");
+  cJSON_DeleteItemFromObject(obj.get(), "wifiPassword");
 
-  cJSON *ethEnabledItem = cJSON_GetObjectItem(obj, "ethernetEnabled");
+  cJSON *ethEnabledItem = cJSON_GetObjectItem(obj.get(), "ethernetEnabled");
   bool ethernetEnabled = (ethEnabledItem && cJSON_IsBool(ethEnabledItem) && cJSON_IsTrue(ethEnabledItem));
 
   if (!ethernetEnabled && !wifiProvided) {
-    cJSON_Delete(obj);
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("WiFi SSID and password are required (or enable Ethernet)"));
-    std::string response = cjson_to_string_and_free(res);
+    std::string response = JsonBuilder::object()
+        .addBool("success", false)
+        .addString("error", "WiFi SSID and password are required (or enable Ethernet)")
+        .toStringUnformatted();
     httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
     return ESP_FAIL;
   }
 
   if (wifiProvided) {
     if (ssid.length() > 32 || password.length() < 8 || password.length() > 64) {
-      cJSON_Delete(obj);
       httpd_resp_set_status(req, "400 Bad Request");
       httpd_resp_set_type(req, "application/json");
-      cJSON *res = cJSON_CreateObject();
-      cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-      cJSON_AddItemToObject(res, "error", cJSON_CreateString("Invalid WiFi credentials length"));
-      std::string response = cjson_to_string_and_free(res);
+      std::string response = JsonBuilder::object()
+          .addBool("success", false)
+          .addString("error", "Invalid WiFi credentials length")
+          .toStringUnformatted();
       httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
       return ESP_FAIL;
     }
   }
 
-  cJSON *colorItem = cJSON_GetObjectItem(obj, "hk_key_color");
+  cJSON *colorItem = cJSON_GetObjectItem(obj.get(), "hk_key_color");
   if (colorItem && cJSON_IsNumber(colorItem) && colorItem->valueint > 3) {
-    cJSON_Delete(obj);
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Invalid hk_key_color (must be <= 3)\"}");
     return ESP_FAIL;
   }
 
-  cJSON *nfcReaderTypeItem = cJSON_GetObjectItem(obj, "nfcReaderType");
-  // 0 = PN532 (SPI), 1 = PN7161, 2 = ST25R3916 (I2C).
+  cJSON *nfcReaderTypeItem = cJSON_GetObjectItem(obj.get(), "nfcReaderType");
   if (nfcReaderTypeItem && cJSON_IsNumber(nfcReaderTypeItem) && (nfcReaderTypeItem->valueint < 0 || nfcReaderTypeItem->valueint > 2)) {
-    cJSON_Delete(obj);
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Invalid nfcReaderType\"}");
     return ESP_FAIL;
   }
 
-  cJSON *setupCodeItem = cJSON_GetObjectItem(obj, "setupCode");
+  cJSON *setupCodeItem = cJSON_GetObjectItem(obj.get(), "setupCode");
   if (setupCodeItem && cJSON_IsString(setupCodeItem)) {
     setupCode = setupCodeItem->valuestring;
     hasSetupCode = true;
   }
 
   std::string currentConfigJson = instance->m_configManager.serializeToJson<espConfig::misc_config_t>();
-  cJSON *currentConfigData = cJSON_Parse(currentConfigJson.c_str());
+  JsonGuard currentConfigData(cJSON_Parse(currentConfigJson.c_str()));
   if (!currentConfigData) {
-    cJSON_Delete(obj);
     httpd_resp_send_500(req);
     return ESP_FAIL;
   }
 
-  bool isValid = instance->validateRequest(req, currentConfigData, obj);
-  cJSON_Delete(currentConfigData);
-
+  bool isValid = instance->validateRequest(req, currentConfigData.get(), obj.get());
   if (!isValid) {
-    cJSON_Delete(obj);
-    return ESP_FAIL; // validateRequest has already sent the HTTP error response
+    return ESP_FAIL; 
   }
-  auto cleaned_body_str = cjson_to_string_and_free(obj);
+  
+  // Safely stringify the cleaned object
+  std::string cleaned_body_str = to_string_unformatted(obj);
 
   if (wifiProvided) {
     if (!connectWiFi(ssid.c_str(), password.c_str(), 15000)) {
       httpd_resp_set_status(req, "400 Bad Request");
       httpd_resp_set_type(req, "application/json");
-      cJSON *errorRes = cJSON_CreateObject();
-      cJSON_AddItemToObject(errorRes, "success", cJSON_CreateBool(false));
-      cJSON_AddItemToObject(errorRes, "error", cJSON_CreateString("Failed to connect to WiFi network. Please check your credentials and try again."));
-      std::string response = cjson_to_string_and_free(errorRes);
+      std::string response = JsonBuilder::object()
+          .addBool("success", false)
+          .addString("error", "Failed to connect to WiFi network. Please check your credentials and try again.")
+          .toStringUnformatted();
       httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
       return ESP_FAIL;
     }
@@ -1587,13 +1539,13 @@ esp_err_t WebServerManager::handleSaveCaptivePortalConfig(httpd_req_t *req) {
   instance->m_configManager.saveConfig<espConfig::misc_config_t>();
 
   httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
-  cJSON_AddItemToObject(res, "message", cJSON_CreateString("Configuration saved successfully"));
-  cJSON *data = cJSON_CreateObject();
-  cJSON_AddStringToObject(data, "ip_addr", WiFi.localIP().toString().c_str());
-  cJSON_AddItemToObject(res, "data", data);
-  std::string response = cjson_to_string_and_free(res);
+  JsonBuilder res = JsonBuilder::object();
+  res.addBool("success", true);
+  res.addString("message", "Configuration saved successfully");
+  res.withObject("data", [&](JsonBuilder& data) {
+    data.addString("ip_addr", WiFi.localIP().toString().c_str());
+  });
+  std::string response = res.toStringUnformatted();
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
@@ -1612,10 +1564,10 @@ esp_err_t WebServerManager::handleWifiScan(httpd_req_t *req) {
       ESP_LOGE(TAG, "Failed to set APSTA mode: %s", esp_err_to_name(mode_err));
       httpd_resp_set_status(req, "500 Internal Server Error");
       httpd_resp_set_type(req, "application/json");
-      cJSON *res = cJSON_CreateObject();
-      cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-      cJSON_AddItemToObject(res, "error", cJSON_CreateString("Failed to enable scan mode"));
-      std::string response = cjson_to_string_and_free(res);
+      std::string response = JsonBuilder::object()
+          .addBool("success", false)
+          .addString("error", "Failed to enable scan mode")
+          .toStringUnformatted();
       httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
     }
@@ -1636,10 +1588,10 @@ esp_err_t WebServerManager::handleWifiScan(httpd_req_t *req) {
     }
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("WiFi scan failed to start"));
-    std::string response = cjson_to_string_and_free(res);
+    std::string response = JsonBuilder::object()
+        .addBool("success", false)
+        .addString("error", "WiFi scan failed to start")
+        .toStringUnformatted();
     httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
@@ -1661,36 +1613,35 @@ esp_err_t WebServerManager::handleWifiScan(httpd_req_t *req) {
     ESP_LOGI(TAG, "Restored WiFi mode to AP");
   }
 
-  cJSON *networks = cJSON_CreateArray();
-  for (int i = 0; i < ap_count; i++) {
-    cJSON *network = cJSON_CreateObject();
-    cJSON_AddStringToObject(network, "ssid", (char*)ap_records[i].ssid);
-    cJSON_AddNumberToObject(network, "rssi", ap_records[i].rssi);
-    cJSON_AddNumberToObject(network, "channel", ap_records[i].primary);
+  JsonBuilder res = JsonBuilder::object();
+  res.addBool("success", true);
+  res.withArray("data", [&](JsonBuilder& networks) {
+    for (int i = 0; i < ap_count; i++) {
+      JsonBuilder network = JsonBuilder::object();
+      network.addString("ssid", (char*)ap_records[i].ssid);
+      network.addNumber("rssi", ap_records[i].rssi);
+      network.addNumber("channel", ap_records[i].primary);
 
-    const char* auth_mode;
-    switch (ap_records[i].authmode) {
-      case WIFI_AUTH_OPEN: auth_mode = "OPEN"; break;
-      case WIFI_AUTH_WEP: auth_mode = "WEP"; break;
-      case WIFI_AUTH_WPA_PSK: auth_mode = "WPA_PSK"; break;
-      case WIFI_AUTH_WPA2_PSK: auth_mode = "WPA2_PSK"; break;
-      case WIFI_AUTH_WPA_WPA2_PSK: auth_mode = "WPA_WPA2_PSK"; break;
-      case WIFI_AUTH_WPA2_ENTERPRISE: auth_mode = "WPA2_ENTERPRISE"; break;
-      case WIFI_AUTH_WPA3_PSK: auth_mode = "WPA3_PSK"; break;
-      case WIFI_AUTH_WPA2_WPA3_PSK: auth_mode = "WPA2_WPA3_PSK"; break;
-      default: auth_mode = "UNKNOWN"; break;
+      const char* auth_mode;
+      switch (ap_records[i].authmode) {
+        case WIFI_AUTH_OPEN: auth_mode = "OPEN"; break;
+        case WIFI_AUTH_WEP: auth_mode = "WEP"; break;
+        case WIFI_AUTH_WPA_PSK: auth_mode = "WPA_PSK"; break;
+        case WIFI_AUTH_WPA2_PSK: auth_mode = "WPA2_PSK"; break;
+        case WIFI_AUTH_WPA_WPA2_PSK: auth_mode = "WPA_WPA2_PSK"; break;
+        case WIFI_AUTH_WPA2_ENTERPRISE: auth_mode = "WPA2_ENTERPRISE"; break;
+        case WIFI_AUTH_WPA3_PSK: auth_mode = "WPA3_PSK"; break;
+        case WIFI_AUTH_WPA2_WPA3_PSK: auth_mode = "WPA2_WPA3_PSK"; break;
+        default: auth_mode = "UNKNOWN"; break;
+      }
+      network.addString("auth", auth_mode);
+      networks.addItemToArray(std::move(network).release());
     }
-    cJSON_AddStringToObject(network, "auth", auth_mode);
-
-    cJSON_AddItemToArray(networks, network);
-  }
+  });
+  res.addString("message", "WiFi scan complete");
 
   httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
-  cJSON_AddItemToObject(res, "data", networks);
-  cJSON_AddItemToObject(res, "message", cJSON_CreateString("WiFi scan complete"));
-  std::string response = cjson_to_string_and_free(res);
+  std::string response = res.toStringUnformatted();
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
@@ -1916,22 +1867,19 @@ void WebServerManager::ws_send_task(void *arg) {
   }
 }
 
-esp_err_t WebServerManager::handleWebSocketMessage(httpd_req_t *req,
-                                                   const std::string &message) {
-  cJSON *json = cJSON_Parse(message.c_str());
+esp_err_t WebServerManager::handleWebSocketMessage(httpd_req_t *req, const std::string &message) {
+  JsonGuard json(cJSON_Parse(message.c_str()));
   if (!json) {
-    cJSON *error = cJSON_CreateObject();
-    cJSON_AddStringToObject(error, "type", "error");
-    cJSON_AddStringToObject(error, "message", "Invalid JSON format");
-    std::string err_str = cjson_to_string_and_free(error);
-    queue_ws_frame(httpd_req_to_sockfd(req), (const uint8_t *)err_str.c_str(),
-                   err_str.size(), HTTPD_WS_TYPE_TEXT);
+    std::string err_str = JsonBuilder::object()
+        .addString("type", "error")
+        .addString("message", "Invalid JSON format")
+        .toStringUnformatted();
+    queue_ws_frame(httpd_req_to_sockfd(req), (const uint8_t *)err_str.c_str(), err_str.size(), HTTPD_WS_TYPE_TEXT);
     return ESP_OK;
   }
 
-  cJSON *type_item = cJSON_GetObjectItem(json, "type");
+  cJSON *type_item = cJSON_GetObjectItem(json.get(), "type");
   if (!type_item || !cJSON_IsString(type_item)) {
-    cJSON_Delete(json);
     return ESP_OK;
   }
 
@@ -1940,10 +1888,10 @@ esp_err_t WebServerManager::handleWebSocketMessage(httpd_req_t *req,
   std::string response;
 
   if (msg_type == "ping") {
-    cJSON *pong = cJSON_CreateObject();
-    cJSON_AddStringToObject(pong, "type", "pong");
-    cJSON_AddNumberToObject(pong, "timestamp", static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    response = cjson_to_string_and_free(pong);
+    response = JsonBuilder::object()
+        .addString("type", "pong")
+        .addNumber("timestamp", static_cast<uint32_t>(esp_timer_get_time() / 1000))
+        .toStringUnformatted();
   } else if (msg_type == "metrics") {
     response = getDeviceMetrics();
   } else if (msg_type == "sysinfo") {
@@ -1951,7 +1899,7 @@ esp_err_t WebServerManager::handleWebSocketMessage(httpd_req_t *req,
   } else if (msg_type == "ota_info") {
     response = getOTAInfo();
   } else if (msg_type == "set_log_level") {  
-    cJSON *level_item = cJSON_GetObjectItem(json, "data");
+    cJSON *level_item = cJSON_GetObjectItem(json.get(), "data");
     if(level_item && cJSON_IsNumber(level_item)) {
       esp_log_level_t level = esp_log_level_t(level_item->valueint >= 0 && level_item->valueint < 6 ? level_item->valueint : ESP_LOG_WARN);
       esp_log_level_set("*", level);
@@ -1960,7 +1908,7 @@ esp_err_t WebServerManager::handleWebSocketMessage(httpd_req_t *req,
     }
     response = getDeviceInfo();
   } else if (msg_type == "set_backlog_max_size") {
-    cJSON *item = cJSON_GetObjectItem(json, "data");
+    cJSON *item = cJSON_GetObjectItem(json.get(), "data");
     if(item && cJSON_IsNumber(item)) {
       if(item->valueint >= 0 && item->valueint <= 65535){
         wsBacklogSize = item->valueint;
@@ -1969,16 +1917,14 @@ esp_err_t WebServerManager::handleWebSocketMessage(httpd_req_t *req,
     }
     response = getDeviceInfo();
   } else {
-    cJSON *unknown = cJSON_CreateObject();
-    cJSON_AddStringToObject(unknown, "type", "error");
-    cJSON_AddStringToObject(unknown, "message", "Unknown message type");
-    cJSON_AddStringToObject(unknown, "received_type", msg_type.c_str());
-    response = cjson_to_string_and_free(unknown);
+    response = JsonBuilder::object()
+        .addString("type", "error")
+        .addString("message", "Unknown message type")
+        .addString("received_type", msg_type.c_str())
+        .toStringUnformatted();
   }
 
-  queue_ws_frame(sockfd, (const uint8_t *)response.c_str(), response.size(),
-                 HTTPD_WS_TYPE_TEXT);
-  cJSON_Delete(json);
+  queue_ws_frame(sockfd, (const uint8_t *)response.c_str(), response.size(), HTTPD_WS_TYPE_TEXT);
   return ESP_OK;
 }
 
@@ -1987,39 +1933,34 @@ esp_err_t WebServerManager::handleWebSocketMessage(httpd_req_t *req,
 // ============================================================================
 
 std::string WebServerManager::getDeviceMetrics() {
-  cJSON *status = cJSON_CreateObject();
-  cJSON_AddStringToObject(status, "type", "metrics");
-  cJSON_AddNumberToObject(status, "uptime", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<int64_t, std::micro>(esp_timer_get_time())).count());
-  cJSON_AddNumberToObject(status, "free_heap", esp_get_free_heap_size());
-  cJSON_AddNumberToObject(status, "wifi_rssi", WiFi.RSSI());
-  cJSON_AddBoolToObject(status, "nfc_connected", m_nfcManager ? m_nfcManager->isConnected() : false);
-  cJSON_AddNumberToObject(status, "nfc_reader_type", m_configManager.getConfig<espConfig::misc_config_t>().nfcReaderType);
-  cJSON_AddBoolToObject(status, "mqtt_connected", m_mqttManager ? m_mqttManager->isConnected() : false);
-  cJSON_AddNumberToObject(status, "mqtt_error_code", m_mqttManager ? static_cast<uint8_t>(m_mqttManager->getLastErrorCode()) : 0);
+  JsonBuilder status = JsonBuilder::object();
+  status.addString("type", "metrics");
+  status.addNumber("uptime", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<int64_t, std::micro>(esp_timer_get_time())).count());
+  status.addNumber("free_heap", esp_get_free_heap_size());
+  status.addNumber("wifi_rssi", WiFi.RSSI());
+  status.addBool("nfc_connected", m_nfcManager ? m_nfcManager->isConnected() : false);
+  status.addNumber("nfc_reader_type", m_configManager.getConfig<espConfig::misc_config_t>().nfcReaderType);
+  status.addBool("mqtt_connected", m_mqttManager ? m_mqttManager->isConnected() : false);
+  status.addNumber("mqtt_error_code", m_mqttManager ? static_cast<uint8_t>(m_mqttManager->getLastErrorCode()) : 0);
   if (m_mqttManager && !m_mqttManager->getLastErrorMessage().empty()) {
-    cJSON_AddStringToObject(status, "mqtt_error_message", m_mqttManager->getLastErrorMessage().c_str());
+    status.addString("mqtt_error_message", m_mqttManager->getLastErrorMessage().c_str());
   }
-  return cjson_to_string_and_free(status);
+  return status.toStringUnformatted();
 }
 
 std::string WebServerManager::getDeviceInfo() {
-  cJSON *info = cJSON_CreateObject();
-  cJSON_AddStringToObject(info, "type", "sysinfo");
-  cJSON_AddStringToObject(
-      info, "deviceName",
-      m_configManager.getConfig<espConfig::misc_config_t>().deviceName.c_str());
-  cJSON_AddStringToObject(info, "version", esp_app_get_description()->version);
-  cJSON_AddBoolToObject(
-      info, "eth_enabled",
-      m_configManager.getConfig<espConfig::misc_config_t>().ethernetEnabled);
-  cJSON_AddStringToObject(info, "wifi_ssid", WiFi.SSID().c_str());
-  cJSON_AddNumberToObject(info, "log_level", esp_log_level_get("*"));
+  JsonBuilder info = JsonBuilder::object();
+  info.addString("type", "sysinfo");
+  info.addString("deviceName", m_configManager.getConfig<espConfig::misc_config_t>().deviceName.c_str());
+  info.addString("version", esp_app_get_description()->version);
+  info.addBool("eth_enabled", m_configManager.getConfig<espConfig::misc_config_t>().ethernetEnabled);
+  info.addString("wifi_ssid", WiFi.SSID().c_str());
+  info.addNumber("log_level", esp_log_level_get("*"));
   esp_chip_info_t chipInfo;
   esp_chip_info(&chipInfo);
-  cJSON_AddNumberToObject(info, "chip_model", chipInfo.model);
-  cJSON_AddNumberToObject(info, "log_level", esp_log_level_get("*"));
-  cJSON_AddNumberToObject(info, "backlog_max_size", wsBacklogSize);
-  return cjson_to_string_and_free(info);
+  info.addNumber("chip_model", chipInfo.model);
+  info.addNumber("backlog_max_size", wsBacklogSize);
+  return info.toStringUnformatted();
 }
 
 void WebServerManager::statusTimerCallback(void *arg) {
@@ -2246,10 +2187,10 @@ error:
   
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_status(req, "500 Internal Server Error");
-  cJSON *errResp = cJSON_CreateObject();
-  cJSON_AddBoolToObject(errResp, "success", false);
-  cJSON_AddStringToObject(errResp, "error", params->state->error.c_str());
-  std::string errJson = cjson_to_string_and_free(errResp);
+  std::string errJson = JsonBuilder::object()
+      .addBool("success", false)
+      .addString("error", params->state->error.c_str())
+      .toStringUnformatted();
   httpd_resp_sendstr(req, errJson.c_str());
   httpd_req_async_handler_complete(req);
   instance->m_otaInProgress = false;
@@ -2259,44 +2200,39 @@ error:
 }
 
 std::string WebServerManager::getOTAInfo() {
-  cJSON *status = cJSON_CreateObject();
-  cJSON_AddStringToObject(status, "type", "ota_info");
+  JsonBuilder status = JsonBuilder::object();
+  status.addString("type", "ota_info");
   
-  cJSON_AddStringToObject(status, "current_version",
+  status.addString("current_version",
                           esp_app_get_description()->version);
 
   const esp_partition_t *running = esp_ota_get_running_partition();
   const esp_partition_t *next_update = esp_ota_get_next_update_partition(NULL);
   if (running)
-    cJSON_AddStringToObject(status, "running_partition", running->label);
+    status.addString("running_partition", running->label);
   if (next_update)
-    cJSON_AddStringToObject(status, "next_update_partition",
+    status.addString("next_update_partition",
                             next_update->label);
-  return cjson_to_string_and_free(status);
+  return status.toStringUnformatted();
 }
 
 void WebServerManager::broadcastOTAStatus(const OTAState& state) {
-  cJSON *status = cJSON_CreateObject();
-  cJSON_AddStringToObject(status, "type", "ota_status");
-  if (!state.error.empty())
-    cJSON_AddStringToObject(status, "error", state.error.c_str());
-  cJSON_AddBoolToObject(status, "in_progress", state.inProgress);
-  cJSON_AddNumberToObject(status, "bytes_written", state.writtenBytes);
-  cJSON_AddStringToObject(status, "upload_type",
-                          (state.currentUploadType == OTAUploadType::LITTLEFS)
-                              ? "littlefs"
-                              : "firmware");
+  JsonBuilder status = JsonBuilder::object();
+  status.addString("type", "ota_status");
+  if (!state.error.empty()) {
+    status.addString("error", state.error.c_str());
+  }
+  status.addBool("in_progress", state.inProgress);
+  status.addNumber("bytes_written", state.writtenBytes);
+  status.addString("upload_type", (state.currentUploadType == OTAUploadType::LITTLEFS) ? "littlefs" : "firmware");
 
   if (state.inProgress && state.totalBytes > 0) {
-    cJSON_AddNumberToObject(status, "progress_percent",
-                            (float)state.writtenBytes / state.totalBytes *
-                                100.0f);
-    cJSON_AddNumberToObject(status, "total_bytes", state.totalBytes);
+    status.addNumber("progress_percent", (float)state.writtenBytes / state.totalBytes * 100.0f);
+    status.addNumber("total_bytes", state.totalBytes);
   }
   
-  std::string otaStatus = cjson_to_string_and_free(status);
-  broadcastWs((const uint8_t *)otaStatus.c_str(), otaStatus.size(),
-              HTTPD_WS_TYPE_TEXT);
+  std::string otaStatus = status.toStringUnformatted();
+  broadcastWs((const uint8_t *)otaStatus.c_str(), otaStatus.size(), HTTPD_WS_TYPE_TEXT);
 }
 
 // ============================================================================
@@ -2312,41 +2248,23 @@ esp_err_t WebServerManager::handleCertificateUpload(httpd_req_t *req) {
     httpd_resp_send_500(req);
     return ESP_FAIL;
   }
+  
   char query[256], type_param[2];
   if(httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-      (httpd_query_key_value(query, "type", type_param, sizeof(type_param)) !=
-           ESP_OK )){
-    httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("Missing 'type' parameter"));
-    httpd_resp_set_status(req, "400 Bad Request");
-    std::string response = cjson_to_string_and_free(res);
-    httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
-    return ESP_FAIL;
+      (httpd_query_key_value(query, "type", type_param, sizeof(type_param)) != ESP_OK )) {
+    return sendJsonError(req, "Missing 'type' parameter", "400 Bad Request");
   }
+  
   uint8_t type_int = std::stoi(type_param);
   const espConfig::CertType type = type_int > (static_cast<uint8_t>(espConfig::CertType::MAX) - 1) ? espConfig::CertType::MAX : static_cast<espConfig::CertType>(type_int);
+  
   const size_t content_len = req->content_len;
   if (content_len == 0 || content_len > 8192) {
-    httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("Invalid bundle content length"));
-    httpd_resp_set_status(req, "400 Bad Request");
-    std::string response = cjson_to_string_and_free(res);
-    httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
-    return ESP_FAIL;
+    return sendJsonError(req, "Invalid bundle content length", "400 Bad Request");
   }
+  
   if (type == espConfig::CertType::MAX) {
-    httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("Invalid 'type' parameter"));
-    httpd_resp_set_status(req, "400 Bad Request");
-    std::string response = cjson_to_string_and_free(res);
-    httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
-    return ESP_FAIL;
+    return sendJsonError(req, "Invalid 'type' parameter", "400 Bad Request");
   }
 
   std::string certBuf;
@@ -2358,14 +2276,7 @@ esp_err_t WebServerManager::handleCertificateUpload(httpd_req_t *req) {
     size_t chunk_size = std::min(remaining, sizeof(buffer) - 1);
     int received = httpd_req_recv(req, buffer, chunk_size);
     if (received <= 0) {
-      httpd_resp_set_type(req, "application/json");
-      cJSON *res = cJSON_CreateObject();
-      cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-      cJSON_AddItemToObject(res, "error", cJSON_CreateString("Failed to receive bundle data"));
-      httpd_resp_set_status(req, "400 Bad Request");
-    std::string response = cjson_to_string_and_free(res);
-    httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
-      return ESP_FAIL;
+      return sendJsonError(req, "Failed to receive bundle data", "400 Bad Request");
     }
     buffer[received] = '\0';
     certBuf.append(buffer, received);
@@ -2375,26 +2286,17 @@ esp_err_t WebServerManager::handleCertificateUpload(httpd_req_t *req) {
   bool success = instance->m_configManager.saveCertificate(type, certBuf);
 
   if (success) {
-    cJSON *response = cJSON_CreateObject();
-    cJSON_AddItemToObject(response, "success", cJSON_CreateBool(true));
-    cJSON_AddStringToObject(
-        response, "message",
-        "Certificate saved successfully!");
-    cJSON_AddNumberToObject(response, "size", content_len);
-    std::string resp = cjson_to_string_and_free(response);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, resp.c_str(), resp.length());
+    std::string response = JsonBuilder::object()
+        .addBool("success", true)
+        .addString("message", "Certificate saved successfully!")
+        .addNumber("size", content_len)
+        .toStringUnformatted();
+    httpd_resp_send(req, response.c_str(), response.length());
     return ESP_OK;
   }
 
-  httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-  cJSON_AddItemToObject(res, "error", cJSON_CreateString("Failed to save certificate"));
-  httpd_resp_set_status(req, HTTPD_500);
-  std::string response = cjson_to_string_and_free(res);
-  httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
-  return ESP_FAIL;
+  return sendJsonError(req, "Failed to save certificate", HTTPD_500);
 }
 
 esp_err_t WebServerManager::handleCertificateStatus(httpd_req_t *req) {
@@ -2407,50 +2309,38 @@ esp_err_t WebServerManager::handleCertificateStatus(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-  cJSON *response = cJSON_CreateObject();
-  cJSON *certificates = cJSON_CreateObject();
+  JsonBuilder response = JsonBuilder::object();
+  response.withObject("data", [&](JsonBuilder& certificates) {
+    std::vector<CertificateStatus> status = instance->m_configManager.getCertificatesStatus();
+    for (auto cert : status) {
+      JsonBuilder certInfo = JsonBuilder::object();
+      bool isPrivateKey = (cert.type == espConfig::CertType::MQTT_PRIVATE_KEY || cert.type == espConfig::CertType::HTTPS_PRIVATE_KEY);
+      bool isCA = (cert.type == espConfig::CertType::MQTT_CA || cert.type == espConfig::CertType::HTTPS_CA_CERT);
 
-  std::vector<CertificateStatus> status =
-      instance->m_configManager.getCertificatesStatus();
-  for (auto cert : status) {
-    cJSON *certInfo = cJSON_CreateObject();
-
-    bool isPrivateKey = (cert.type == espConfig::CertType::MQTT_PRIVATE_KEY ||
-                         cert.type == espConfig::CertType::HTTPS_PRIVATE_KEY);
-    bool isCA = (cert.type == espConfig::CertType::MQTT_CA ||
-                         cert.type == espConfig::CertType::HTTPS_CA_CERT);
-
-    if (!isPrivateKey) {
-      if (!cert.issuer.empty())
-        cJSON_AddStringToObject(certInfo, "issuer", cert.issuer.c_str());
-      if (!cert.subject.empty())
-        cJSON_AddStringToObject(certInfo, "subject", cert.subject.c_str());
-      if (!cert.serial.empty())
-        cJSON_AddStringToObject(certInfo, "serial", cert.serial.c_str());
-      if (!cert.fingerprint.empty())
-        cJSON_AddStringToObject(certInfo, "fingerprint", cert.fingerprint.c_str());
-      if (!cert.expiration.from.empty() && !cert.expiration.to.empty()) {
-        cJSON *expiration = cJSON_CreateObject();
-        cJSON_AddStringToObject(expiration, "from",
-                                cert.expiration.from.c_str());
-        cJSON_AddStringToObject(expiration, "to", cert.expiration.to.c_str());
-        cJSON_AddItemToObject(certInfo, "expiration", expiration);
+      if (!isPrivateKey) {
+        if (!cert.issuer.empty()) certInfo.addString("issuer", cert.issuer.c_str());
+        if (!cert.subject.empty()) certInfo.addString("subject", cert.subject.c_str());
+        if (!cert.serial.empty()) certInfo.addString("serial", cert.serial.c_str());
+        if (!cert.fingerprint.empty()) certInfo.addString("fingerprint", cert.fingerprint.c_str());
+        if (!cert.expiration.from.empty() && !cert.expiration.to.empty()) {
+          certInfo.withObject("expiration", [&](JsonBuilder& exp) {
+            exp.addString("from", cert.expiration.from.c_str());
+            exp.addString("to", cert.expiration.to.c_str());
+          });
+        }
+        if(!isCA){
+          certInfo.addBool("keyMatchesCert", cert.keyMatchesCert);
+        }
+      } else {
+        certInfo.addBool("exists", true);
+        certInfo.addString("keyType", cert.keyType.c_str());
       }
-      if(!isCA){
-        cJSON_AddBoolToObject(certInfo, "keyMatchesCert", cert.keyMatchesCert);
-      }
-    } else {
-      cJSON_AddBoolToObject(certInfo, "exists", true);
-      cJSON_AddStringToObject(certInfo, "keyType", cert.keyType.c_str());
+      certificates.addItem(std::to_string(static_cast<uint8_t>(cert.type)).c_str(), std::move(certInfo).release());
     }
+  });
+  response.addBool("success", true);
 
-    cJSON_AddItemToObject(certificates, std::to_string(static_cast<uint8_t>(cert.type)).c_str(), certInfo);
-  }
-
-  cJSON_AddItemToObject(response, "data", certificates);
-  cJSON_AddItemToObject(response, "success", cJSON_CreateBool(true));
-
-  std::string resp = cjson_to_string_and_free(response);
+  std::string resp = response.toStringUnformatted();
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, resp.c_str(), resp.length());
   return ESP_OK;
@@ -2465,50 +2355,31 @@ esp_err_t WebServerManager::handleCertificateDelete(httpd_req_t *req) {
     httpd_resp_send_500(req);
     return ESP_FAIL;
   }
+  
   char query[256], type_param[2];
   if(httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-      (httpd_query_key_value(query, "type", type_param, sizeof(type_param)) !=
-           ESP_OK )){
-    httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("Missing 'type' parameter"));
-    httpd_resp_set_status(req, "400 Bad Request");
-    std::string response = cjson_to_string_and_free(res);
-    httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
-    return ESP_FAIL;
+      (httpd_query_key_value(query, "type", type_param, sizeof(type_param)) != ESP_OK )) {
+    return sendJsonError(req, "Missing 'type' parameter", "400 Bad Request");
   }
+  
   uint8_t type_int = std::stoi(type_param);
   const espConfig::CertType type = type_int > (static_cast<uint8_t>(espConfig::CertType::MAX) - 1) ? espConfig::CertType::MAX : static_cast<espConfig::CertType>(type_int);
+  
   if (type == espConfig::CertType::MAX) {
-    httpd_resp_set_type(req, "application/json");
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-    cJSON_AddItemToObject(res, "error", cJSON_CreateString("Invalid certificate type"));
-    httpd_resp_set_status(req, "400 Bad Request");
-    std::string response = cjson_to_string_and_free(res);
-    httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
-    return ESP_FAIL;
+    return sendJsonError(req, "Invalid certificate type", "400 Bad Request");
   }
 
   bool success = instance->m_configManager.deleteCertificate(type);
 
   if (success) {
-    cJSON *response = cJSON_CreateObject();
-    cJSON_AddItemToObject(response, "success", cJSON_CreateBool(true));
-    cJSON_AddStringToObject(response, "message", "Certificate deleted");
-    std::string resp = cjson_to_string_and_free(response);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, resp.c_str(), resp.length());
+    std::string response = JsonBuilder::object()
+        .addBool("success", true)
+        .addString("message", "Certificate deleted")
+        .toStringUnformatted();
+    httpd_resp_send(req, response.c_str(), response.length());
     return ESP_OK;
   }
 
-  httpd_resp_set_type(req, "application/json");
-  cJSON *res = cJSON_CreateObject();
-  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
-  cJSON_AddItemToObject(res, "error", cJSON_CreateString("Failed to delete certificate"));
-  httpd_resp_set_status(req, HTTPD_500);
-  std::string response = cjson_to_string_and_free(res);
-  httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
-  return ESP_FAIL;
+  return sendJsonError(req, "Failed to delete certificate", HTTPD_500);
 }
