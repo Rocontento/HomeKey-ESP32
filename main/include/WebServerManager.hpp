@@ -134,6 +134,7 @@ private:
   static esp_err_t handleCertificateStatus(httpd_req_t *req);
   static esp_err_t handleCertificateDelete(httpd_req_t *req);
 
+  static void captivePortalSaveTask(void* pvParameters);
   static esp_err_t handleCaptivePortal(httpd_req_t *req);
   static esp_err_t handleGetCaptivePortalConfig(httpd_req_t *req);
   static esp_err_t handleSaveCaptivePortalConfig(httpd_req_t *req);
@@ -196,8 +197,7 @@ private:
   std::mutex m_wsClientsMutex;
   esp_timer_handle_t m_statusTimer;
   std::deque<std::vector<uint8_t>> m_wsBroadcastBuffer;
-  uint16_t wsBacklogSize = 0;
-
+  std::atomic<uint16_t> wsBacklogSize{0};
   std::atomic<bool> m_otaInProgress{false};
   bool m_isInitialized{false};
 };

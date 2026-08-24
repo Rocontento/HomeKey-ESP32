@@ -306,6 +306,15 @@ void WebServerManager::end() {
   }
 
   if (m_wsQueue) {
+    WsFrame* frame = nullptr;
+    while (xQueueReceive(m_wsQueue, &frame, 0) == pdPASS) {
+      if (frame) {
+        if (frame->payload != frame->inlinePayload) {
+          delete[] frame->payload;
+        }
+        delete frame;
+      }
+    }
     vQueueDelete(m_wsQueue);
     m_wsQueue = nullptr;
   }
@@ -927,8 +936,12 @@ esp_err_t WebServerManager::handleSaveConfig(httpd_req_t *req) {
       std::vector<uint8_t> d;
       alpaca::serialize(s, d);
       AppEventLoop::publish(HW_EVENT, HW_CONFIG_CHANGED, d.data(), d.size());
-      if (keyStr == "gpioActionPin" && it->valueint != 255 && cJSON_IsTrue(cJSON_GetObjectItem(configSchema.get(), "hkDumbSwitchMode"))) {
-        cJSON_AddBoolToObject(obj.get(), "hkDumbSwitchMode", false);
+      
+      if (keyStr == "gpioActionPin" && it->valueint != 255) {
+        cJSON* dumbSwitch = cJSON_GetObjectItem(obj.get(), "hkDumbSwitchMode");
+        if (dumbSwitch && cJSON_IsTrue(dumbSwitch)) {
+          cJSON_SetBoolValue(dumbSwitch, false); // Mutates in-place safely
+        }
       }
     } else if (keyStr == "btrLowStatusThreshold") {
       EventValueChanged s{.name = "btrLowThreshold", .newValue = (uint8_t)it->valueint};
@@ -1392,6 +1405,67 @@ static bool connectWiFi(const char* ssid, const char* password, int timeoutMs = 
   return connected;
 }
 
+struct WifiSaveParams {
+    httpd_req_t* req;
+    WebServerManager* instance;
+    std::string ssid;
+    std::string password;
+    std::string setupCode;
+    bool hasSetupCode;
+    std::string cleaned_body_str;
+};
+
+void WebServerManager::captivePortalSaveTask(void *pvParameters) {
+  WifiSaveParams *params = static_cast<WifiSaveParams *>(pvParameters);
+
+  bool connected =
+      connectWiFi(params->ssid.c_str(), params->password.c_str(), 15000);
+
+  if (connected) {
+    homeSpan.setWifiCredentials(params->ssid.c_str(), params->password.c_str());
+
+    if (params->hasSetupCode) {
+      homeSpan.setPairingCode(params->setupCode.c_str(), false);
+    }
+
+    params->instance->m_configManager.updateFromJson<espConfig::misc_config_t>(
+        params->cleaned_body_str);
+    params->instance->m_configManager.saveConfig<espConfig::misc_config_t>();
+
+    std::string ipAddr = WiFi.localIP().toString().c_str();
+
+    httpd_resp_set_type(params->req, "application/json");
+    JsonBuilder res = JsonBuilder::object();
+    res.addBool("success", true);
+    res.addString("message", "Configuration saved successfully.");
+    res.withObject("data", [&](JsonBuilder &data) {
+      data.addString("ip_addr", ipAddr.c_str());
+    });
+
+    std::string response = res.toStringUnformatted();
+    httpd_resp_send(params->req, response.c_str(), HTTPD_RESP_USE_STRLEN);
+
+    httpd_req_async_handler_complete(params->req);
+
+    delete params;
+  } else {
+    httpd_resp_set_status(params->req, "400 Bad Request");
+    httpd_resp_set_type(params->req, "application/json");
+    std::string response =
+        JsonBuilder::object()
+            .addBool("success", false)
+            .addString("error", "Failed to connect to WiFi network. Please "
+                                "check your credentials and try again.")
+            .toStringUnformatted();
+    httpd_resp_send(params->req, response.c_str(), HTTPD_RESP_USE_STRLEN);
+
+    httpd_req_async_handler_complete(params->req);
+
+    delete params;
+  }
+  vTaskDelete(NULL);
+}
+
 esp_err_t WebServerManager::handleSaveCaptivePortalConfig(httpd_req_t *req) {
   WebServerManager *instance = getInstance(req);
   if (!instance) {
@@ -1517,21 +1591,32 @@ esp_err_t WebServerManager::handleSaveCaptivePortalConfig(httpd_req_t *req) {
     return ESP_FAIL; 
   }
   
-  // Safely stringify the cleaned object
   std::string cleaned_body_str = to_string_unformatted(obj);
 
   if (wifiProvided) {
-    if (!connectWiFi(ssid.c_str(), password.c_str(), 15000)) {
-      httpd_resp_set_status(req, "400 Bad Request");
-      httpd_resp_set_type(req, "application/json");
-      std::string response = JsonBuilder::object()
-          .addBool("success", false)
-          .addString("error", "Failed to connect to WiFi network. Please check your credentials and try again.")
-          .toStringUnformatted();
-      httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
-      return ESP_FAIL;
+    httpd_req_t* reqCopy = nullptr;
+    if (httpd_req_async_handler_begin(req, &reqCopy) != ESP_OK) {
+      return sendJsonError(req, "Failed to start save operation");
     }
-    homeSpan.setWifiCredentials(ssid.c_str(), password.c_str());
+
+    WifiSaveParams* params = new WifiSaveParams{
+      .req = reqCopy,
+      .instance = instance,
+      .ssid = ssid,
+      .password = password,
+      .setupCode = setupCode,
+      .hasSetupCode = hasSetupCode,
+      .cleaned_body_str = cleaned_body_str
+    };
+
+    if (xTaskCreate(captivePortalSaveTask, "wifi_save_task", 8192, params, 5, nullptr) != pdPASS) {
+      ESP_LOGE(TAG, "Failed to create WiFi save task");
+      delete params;
+      httpd_req_async_handler_complete(reqCopy);
+      return sendJsonError(req, "Failed to create save task");
+    }
+
+    return ESP_OK;
   }
 
   if (hasSetupCode) {
@@ -1542,13 +1627,10 @@ esp_err_t WebServerManager::handleSaveCaptivePortalConfig(httpd_req_t *req) {
   instance->m_configManager.saveConfig<espConfig::misc_config_t>();
 
   httpd_resp_set_type(req, "application/json");
-  JsonBuilder res = JsonBuilder::object();
-  res.addBool("success", true);
-  res.addString("message", "Configuration saved successfully");
-  res.withObject("data", [&](JsonBuilder& data) {
-    data.addString("ip_addr", WiFi.localIP().toString().c_str());
-  });
-  std::string response = res.toStringUnformatted();
+  std::string response = JsonBuilder::object()
+      .addBool("success", true)
+      .addString("message", "Configuration saved successfully")
+      .toStringUnformatted();
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
@@ -2252,22 +2334,22 @@ esp_err_t WebServerManager::handleCertificateUpload(httpd_req_t *req) {
     return ESP_FAIL;
   }
   
-  char query[256], type_param[2];
+  char query[256], type_param[8];
   if(httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
       (httpd_query_key_value(query, "type", type_param, sizeof(type_param)) != ESP_OK )) {
     return sendJsonError(req, "Missing 'type' parameter", "400 Bad Request");
   }
   
-  uint8_t type_int = std::stoi(type_param);
-  const espConfig::CertType type = type_int > (static_cast<uint8_t>(espConfig::CertType::MAX) - 1) ? espConfig::CertType::MAX : static_cast<espConfig::CertType>(type_int);
+  char* end = nullptr;
+  long type_int = strtol(type_param, &end, 10);
+  if (end == type_param || *end != '\0' || type_int < 0 || type_int >= static_cast<long>(espConfig::CertType::MAX)) {
+    return sendJsonError(req, "Invalid 'type' parameter", "400 Bad Request");
+  }
+  const espConfig::CertType type = static_cast<espConfig::CertType>(type_int);
   
   const size_t content_len = req->content_len;
   if (content_len == 0 || content_len > 8192) {
     return sendJsonError(req, "Invalid bundle content length", "400 Bad Request");
-  }
-  
-  if (type == espConfig::CertType::MAX) {
-    return sendJsonError(req, "Invalid 'type' parameter", "400 Bad Request");
   }
 
   std::string certBuf;
@@ -2349,6 +2431,7 @@ esp_err_t WebServerManager::handleCertificateStatus(httpd_req_t *req) {
   return ESP_OK;
 }
 
+
 esp_err_t WebServerManager::handleCertificateDelete(httpd_req_t *req) {
   WebServerManager *instance = getInstance(req);
   if(!instance->basicAuth(req)){
@@ -2359,18 +2442,18 @@ esp_err_t WebServerManager::handleCertificateDelete(httpd_req_t *req) {
     return ESP_FAIL;
   }
   
-  char query[256], type_param[2];
+  char query[256], type_param[8];
   if(httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
       (httpd_query_key_value(query, "type", type_param, sizeof(type_param)) != ESP_OK )) {
     return sendJsonError(req, "Missing 'type' parameter", "400 Bad Request");
   }
   
-  uint8_t type_int = std::stoi(type_param);
-  const espConfig::CertType type = type_int > (static_cast<uint8_t>(espConfig::CertType::MAX) - 1) ? espConfig::CertType::MAX : static_cast<espConfig::CertType>(type_int);
-  
-  if (type == espConfig::CertType::MAX) {
-    return sendJsonError(req, "Invalid certificate type", "400 Bad Request");
+  char* end = nullptr;
+  long type_int = strtol(type_param, &end, 10);
+  if (end == type_param || *end != '\0' || type_int < 0 || type_int >= static_cast<long>(espConfig::CertType::MAX)) {
+    return sendJsonError(req, "Invalid 'type' parameter", "400 Bad Request");
   }
+  const espConfig::CertType type = static_cast<espConfig::CertType>(type_int);
 
   bool success = instance->m_configManager.deleteCertificate(type);
 
