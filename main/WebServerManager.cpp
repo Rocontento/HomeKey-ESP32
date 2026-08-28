@@ -97,7 +97,7 @@ inline bool decideNfcPin(uint8_t incoming_pin,
  */
 
 WebServerManager::WebServerManager(ConfigManager &configManager,
-                                   ReaderDataManager &readerDataManager)
+                                   NvsCredentialStore &readerDataManager)
     : m_server(nullptr), m_configManager(configManager),
       m_readerDataManager(readerDataManager), m_mqttManager(nullptr), m_nfcManager(nullptr) {
 }
@@ -691,20 +691,20 @@ esp_err_t WebServerManager::handleGetConfig(httpd_req_t *req) {
     std::string s = instance->m_configManager.serializeToJson<espConfig::actions_config_t>();
     dataGuard.reset(cJSON_Parse(s.c_str()));
   } else if (type == "hkinfo") {
-    const auto readerData = instance->m_readerDataManager.getReaderDataCopy();
+    const auto readerData = instance->m_readerDataManager.snapshot();
     JsonGuard hkInfo(cJSON_CreateObject());
-    cJSON_AddStringToObject(hkInfo.get(), "group_identifier", fmt::format("{:02X}", fmt::join(readerData.reader_gid, "")).c_str());
-    cJSON_AddStringToObject(hkInfo.get(), "unique_identifier", fmt::format("{:02X}", fmt::join(readerData.reader_id, "")).c_str());
+    cJSON_AddStringToObject(hkInfo.get(), "group_identifier", fmt::format("{:02X}", fmt::join(readerData.identity.group_identifier, "")).c_str());
+    cJSON_AddStringToObject(hkInfo.get(), "unique_identifier", fmt::format("{:02X}", fmt::join(readerData.identity.sub_identifier, "")).c_str());
 
     JsonGuard issuersArray(cJSON_CreateArray());
     for (const auto &issuer : readerData.issuers) {
       JsonGuard issuerJson(cJSON_CreateObject());
-      cJSON_AddStringToObject(issuerJson.get(), "issuerId", fmt::format("{:02X}", fmt::join(issuer.issuer_id, "")).c_str());
+      cJSON_AddStringToObject(issuerJson.get(), "issuerId", fmt::format("{:02X}", fmt::join(issuer.id, "")).c_str());
       
       JsonGuard endpointsArray(cJSON_CreateArray());
       for (const auto &endpoint : issuer.endpoints) {
         JsonGuard ep(cJSON_CreateObject());
-        cJSON_AddStringToObject(ep.get(), "endpointId", fmt::format("{:02X}", fmt::join(endpoint.endpoint_id, "")).c_str());
+        cJSON_AddStringToObject(ep.get(), "endpointId", fmt::format("{:02X}", fmt::join(endpoint.id, "")).c_str());
         cJSON_AddItemToArray(endpointsArray.get(), ep.release());
       }
       cJSON_AddItemToObject(issuerJson.get(), "endpoints", endpointsArray.release());

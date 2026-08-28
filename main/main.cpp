@@ -24,7 +24,7 @@
 #include "nvs_flash.h"
 
 std::unique_ptr<LockManager> lockManager;
-ReaderDataManager readerDataManager;
+NvsCredentialStore readerDataManager;
 ConfigManager configManager;
 std::unique_ptr<HardwareManager> hardwareManager;
 std::unique_ptr<MqttManager> mqttManager;

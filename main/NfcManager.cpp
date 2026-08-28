@@ -1,11 +1,17 @@
 #include "NfcManager.hpp"
-#include "DDKReaderData.h"
 #include "ReaderDataManager.hpp"
+#include "ddk/homekey/ProfileFactory.h"
+#include "ddk/session/AuthOutcome.h"
+#include "ddk/session/Flow.h"
+#include "ddk/session/Session.h"
+#include "ddk/store/CredentialStore.h"
+#include "ddk/transport/NfcChannel.h"
 #include "esp32-hal.h"
+#include "esp_log_buffer.h"
+#include "esp_log_level.h"
 #include "eventStructs.hpp"
 #include "fmt/ranges.h"
 #include "freertos/idf_additions.h"
-#include "DDKAuthContext.h"
 #include "Pn532Reader.hpp"
 #include "Pn7160Reader.hpp"
 #include "St25r3916Reader.hpp"
@@ -18,206 +24,34 @@
 #include <esp_log.h>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <serialization.hpp>
 
 const char* NfcManager::TAG = "NfcManager";
 
 static const uint8_t ECP_HEAD[] = { 0x6A, 0x2, 0xCB, 0x2, 0x6, 0x2, 0x11, 0x00 };
 
-/**
- * @brief Task entry wrapper that invokes an instance's auth precompute task.
- *
- * For use as a C-style task entry point; casts the provided task parameter to
- * an NfcManager pointer and calls its authPrecomputeTask method.
- *
- * @param instance Pointer to the NfcManager instance passed as the task parameter.
- */
-void NfcManager::authPrecomputeTaskEntry(void* instance) {
-  static_cast<NfcManager*>(instance)->authPrecomputeTask();
-}
-
-void NfcManager::initAuthPrecompute() {
-  if (m_authCtxFreeQueue || m_authCtxReadyQueue || m_authPrecomputeTaskHandle) {
-    return;
-  }
-
-  m_authCtxFreeQueue = xQueueCreate(kAuthCtxPoolSize, sizeof(AuthCtxCacheItem*));
-  m_authCtxReadyQueue = xQueueCreate(kAuthCtxCacheSize, sizeof(AuthCtxCacheItem*));
-  if (!m_authCtxFreeQueue || !m_authCtxReadyQueue) {
-    ESP_LOGE(TAG, "Failed to create auth precompute queues.");
-    if (m_authCtxFreeQueue) {
-      vQueueDelete(m_authCtxFreeQueue);
-      m_authCtxFreeQueue = nullptr;
-    }
-    if (m_authCtxReadyQueue) {
-      vQueueDelete(m_authCtxReadyQueue);
-      m_authCtxReadyQueue = nullptr;
-    }
-    return;
-  }
-
-  for (size_t i = 0; i < kAuthCtxPoolSize; i++) {
-    m_authPool[i].nfcFn = [this](std::vector<uint8_t>& send, std::vector<uint8_t>& recv, bool isLong) -> bool {
-      if (!m_reader || send.size() > 255) {
-        return false;
-      }
-      return m_reader->exchangeApdu(send, recv, isLong ? 1000 : 500);
-    };
-    m_authPool[i].saveFn = [this](const readerData_t& data) {
-      m_readerDataManager.updateReaderData(data);
-      // Reader data changed (e.g., new persistent key / endpoint). Drop any cached contexts.
-      invalidateAuthCache();
-    };
-    AuthCtxCacheItem* item = &m_authPool[i];
-    xQueueSend(m_authCtxFreeQueue, &item, 0);
-  }
-
-  // 8192, not 4096: constructing a DDKAuthenticationContext runs mbedTLS P-256
-  // key generation. Measured usage is 4056-4288 bytes and varies with the
-  // random key material, so a 4096-byte stack left as little as 40 bytes of
-  // headroom and intermittently overflowed -- panicking mid-transaction, which
-  // the phone reported as a protocol error.
-  BaseType_t ok = xTaskCreateUniversal(authPrecomputeTaskEntry, "hk_auth_precompute", kAuthPrecomputeStackBytes, this, 3, &m_authPrecomputeTaskHandle, 0);
-  if (ok != pdPASS || !m_authPrecomputeTaskHandle) {
-    ESP_LOGE(TAG, "Failed to start auth precompute task.");
-    m_authPrecomputeTaskHandle = nullptr;
-    vQueueDelete(m_authCtxFreeQueue);
-    m_authCtxFreeQueue = nullptr;
-    vQueueDelete(m_authCtxReadyQueue);
-    m_authCtxReadyQueue = nullptr;
-    return;
-  }
-
-  ESP_LOGI(TAG, "Auth precompute enabled (cache=%u, pool=%u).", kAuthCtxCacheSize, kAuthCtxPoolSize);
-}
-
 void NfcManager::invalidateAuthCache() {
   if (!m_hkAuthPrecomputeEnabled) {
     return;
   }
   m_readerDataGeneration.fetch_add(1, std::memory_order_relaxed);
-
-  if (!m_authCtxReadyQueue || !m_authCtxFreeQueue) {
-    return;
-  }
-
-  AuthCtxCacheItem* item = nullptr;
-  uint32_t invalidatedCount = 0;
-  while (xQueueReceive(m_authCtxReadyQueue, &item, 0) == pdTRUE) {
-    if (!item) continue;
-    delete item->ctx;
-    item->ctx = nullptr;
-    xQueueSend(m_authCtxFreeQueue, &item, 0);
-    invalidatedCount++;
-  }
-
-  if (invalidatedCount > 0) {
-    ESP_LOGI(TAG, "Auth cache invalidated (%u items).", invalidatedCount);
-  }
-  if (m_authPrecomputeTaskHandle) {
-    xTaskNotifyGive(m_authPrecomputeTaskHandle);
-  }
 }
 
-void NfcManager::authPrecomputeTask() {
-  ESP_LOGI(TAG, "Auth precompute task started.");
-  while (true) {
-    if (!m_authCtxFreeQueue || !m_authCtxReadyQueue) {
-      vTaskDelay(pdMS_TO_TICKS(1000));
-      continue;
-    }
-
-    const UBaseType_t readyCount = uxQueueMessagesWaiting(m_authCtxReadyQueue);
-    if (readyCount >= kAuthCtxCacheSize) {
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
-      continue;
-    }
-
-    AuthCtxCacheItem* item = nullptr;
-    if (xQueueReceive(m_authCtxFreeQueue, &item, pdMS_TO_TICKS(1000)) != pdTRUE || !item) {
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
-      continue;
-    }
-
-    readerData_t snapshot = m_readerDataManager.getReaderDataCopy();
-    const bool provisioned =
-      snapshot.reader_gid.size() == 8 &&
-      !snapshot.reader_id.empty() &&
-      !snapshot.reader_sk.empty() &&
-      !snapshot.reader_pk.empty();
-
-    if (!provisioned) {
-      ESP_LOGD(TAG, "Auth precompute: reader not provisioned yet, retrying...");
-      xQueueSend(m_authCtxFreeQueue, &item, 0);
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
-      continue;
-    }
-
-    delete item->ctx;
-    item->ctx = nullptr;
-    item->readerData = std::move(snapshot);
-    item->generation = m_readerDataGeneration.load(std::memory_order_relaxed);
-
-    ESP_LOGI(TAG, "Auth precompute: generating (gen=%u, free=%u, ready=%u)...",
-             item->generation,
-             uxQueueMessagesWaiting(m_authCtxFreeQueue),
-             uxQueueMessagesWaiting(m_authCtxReadyQueue));
-
-    auto startTime = std::chrono::high_resolution_clock::now();
-    item->ctx = new (std::nothrow) DDKAuthenticationContext(kHomeKey, item->nfcFn, item->readerData, item->saveFn);
-    auto stopTime = std::chrono::high_resolution_clock::now();
-    const auto durationMs =
-        std::chrono::duration_cast<std::chrono::milliseconds>(stopTime - startTime).count();
-
-
-    // Constructing the context runs mbedTLS P-256 key generation. Report the
-    // headroom straight after: an overflow here reboots the device mid-
-    // transaction, which is indistinguishable from a hang in the logs unless
-    // the reset reason is checked at boot.
-    {
-      const UBaseType_t freeWords = uxTaskGetStackHighWaterMark(nullptr);
-      const unsigned freeBytes = (unsigned)(freeWords * sizeof(StackType_t));
-      if (freeBytes < 768) {
-        ESP_LOGE(TAG, "precompute task stack CRITICALLY LOW: %u bytes free of %u",
-                 freeBytes, (unsigned)kAuthPrecomputeStackBytes);
-      } else {
-        ESP_LOGD(TAG, "precompute task stack headroom: %u bytes free of %u", freeBytes,
-                 (unsigned)kAuthPrecomputeStackBytes);
-      }
-    }
-
-    if (!item->ctx) {
-      ESP_LOGE(TAG, "Auth precompute: allocation failed.");
-      xQueueSend(m_authCtxFreeQueue, &item, 0);
-      vTaskDelay(pdMS_TO_TICKS(250));
-      continue;
-    }
-
-    const uint32_t genAfter = m_readerDataGeneration.load(std::memory_order_relaxed);
-    if (item->generation != genAfter) {
-      ESP_LOGI(TAG, "Auth precompute: stale during generation (itemGen=%u, genNow=%u), retrying...",
-               item->generation,
-               genAfter);
-      delete item->ctx;
-      item->ctx = nullptr;
-      xQueueSend(m_authCtxFreeQueue, &item, 0);
-      continue;
-    }
-
-    if (xQueueSend(m_authCtxReadyQueue, &item, 0) != pdTRUE) {
-      ESP_LOGW(TAG, "Auth precompute: cache is full unexpectedly, dropping context.");
-      delete item->ctx;
-      item->ctx = nullptr;
-      xQueueSend(m_authCtxFreeQueue, &item, 0);
-      continue;
-    }
-
-    ESP_LOGI(TAG, "Auth precompute: ready in %lli ms (gen=%u, free=%u, ready=%u)",
-             durationMs,
-             item->generation,
-             uxQueueMessagesWaiting(m_authCtxFreeQueue),
-             uxQueueMessagesWaiting(m_authCtxReadyQueue));
-  }
+std::unique_ptr<ddk::Session> NfcManager::buildAuthSession() {
+  std::function<bool(std::vector<uint8_t>&, std::vector<uint8_t>&)> nfcFn =
+      [this](std::vector<uint8_t>& send, std::vector<uint8_t>& recv) -> bool {
+        if (!m_reader || send.size() > 255) {
+          return false;
+        }
+        return m_reader->exchangeApdu(send, recv, 1000);
+      };
+  ddk::SessionConfig config;
+  config.target_flow = authFlow;
+  // Constructing the Session runs mbedTLS P-256 ephemeral key generation
+  // (~50 ms on ESP32) -- the cost precompute moves off the tap path.
+  return std::make_unique<ddk::Session>(
+      std::make_shared<ddk::NfcChannel>(nfcFn), m_readerDataManager, config);
 }
 
 /**
@@ -235,7 +69,7 @@ void NfcManager::authPrecomputeTask() {
  * @param hkAuthPrecomputeEnabled If true, enables HomeKit authentication precompute behavior.
  * @param nfcFastPollingEnabled If true, shortens the delay between polling iterations.
  */
-NfcManager::NfcManager(ReaderDataManager& readerDataManager,
+NfcManager::NfcManager(NvsCredentialStore& readerDataManager,
                        const std::array<uint8_t, 4> &nfcGpioPins,
                        uint8_t nfcReaderType,
                        uint8_t nfcIrqPin,
@@ -281,8 +115,7 @@ NfcManager::NfcManager(ReaderDataManager& readerDataManager,
     if(ec) { ESP_LOGE(TAG, "Failed to deserialize HomeKit event: %s", ec.message().c_str()); return; }
     switch(hk_event.type) {
       case ACCESSDATA_CHANGED: {
-        const auto readerData = m_readerDataManager.getReaderDataCopy();
-        const auto& readerGid = readerData.reader_gid;
+        const auto& readerGid = readerDataManager.reader_identity().group_identifier;
         if (readerGid.size() == 8) {
             std::copy(ECP_HEAD, ECP_HEAD + 8, m_ecpData.begin());
             memcpy(m_ecpData.data() + 8, readerGid.data(), 8);
@@ -298,7 +131,10 @@ NfcManager::NfcManager(ReaderDataManager& readerDataManager,
       case DEBUG_AUTH_FLOW: {
         EventValueChanged s = alpaca::deserialize<EventValueChanged>(hk_event.data, ec);
         if(!ec){
-          authFlow = KeyFlow(s.newValue);
+          authFlow = ddk::Flow(s.newValue);
+          // Cached sessions bake target_flow into their SessionConfig at
+          // construction, so drop any built for the previous flow.
+          invalidateAuthCache();
         } else {
           ESP_LOGE(TAG, "Failed to deserialize debug auth flow event: %s", ec.message().c_str());
           return;
@@ -311,6 +147,8 @@ NfcManager::NfcManager(ReaderDataManager& readerDataManager,
   });
 }
 
+NfcManager::~NfcManager() = default;
+
 /**
  * @brief Initialize the selected NFC reader and start the NFC polling task.
  *
@@ -320,8 +158,7 @@ NfcManager::NfcManager(ReaderDataManager& readerDataManager,
  * @return `true` if the NFC polling task was started, `false` otherwise.
  */
 bool NfcManager::begin() {
-    const auto readerData = m_readerDataManager.getReaderDataCopy();
-    const auto& readerGid = readerData.reader_gid;
+    const auto& readerGid = m_readerDataManager.reader_identity().group_identifier;
     if (readerGid.size() == 8) {
         memcpy(m_ecpData.data() + 8, readerGid.data(), 8);
         Utils::crc16a(m_ecpData.data(), 16, m_ecpData.data() + 16);
@@ -353,11 +190,7 @@ bool NfcManager::begin() {
     	ESP_LOGE(TAG, "Unsupported NFC reader type: %u", m_nfcReaderType);
     	return false;
     }
-    if (m_hkAuthPrecomputeEnabled) {
-        initAuthPrecompute();
-    } else {
-        ESP_LOGI(TAG, "Auth precompute disabled.");
-    }
+    ESP_LOGI(TAG, "Auth precompute %s.", m_hkAuthPrecomputeEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "NFC fast polling: %s", m_nfcFastPollingEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "Starting NFC polling task...");
 		BaseType_t ok = xTaskCreateUniversal(
@@ -448,6 +281,26 @@ void NfcManager::pollingTask() {
               }
           }
         }
+
+        if (m_hkAuthPrecomputeEnabled) {
+            const auto& identity = m_readerDataManager.reader_identity();
+            const bool provisioned =
+                identity.group_identifier.size() == 8 &&
+                !identity.sub_identifier.empty() &&
+                !identity.private_key.empty() &&
+                !identity.public_key.empty();
+            if (provisioned &&
+                (!m_cachedSession ||
+                 m_cachedSessionGeneration != m_readerDataGeneration.load(std::memory_order_relaxed))) {
+                auto startTime = std::chrono::high_resolution_clock::now();
+                m_cachedSession = buildAuthSession();
+                m_cachedSessionGeneration = m_readerDataGeneration.load(std::memory_order_relaxed);
+                ESP_LOGI(TAG, "Auth session precomputed in %lli ms.",
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::high_resolution_clock::now() - startTime)
+                                 .count());
+            }
+        }
         if (!m_reader->healthCheck()) {
 					ESP_LOGE(TAG, "NFC reader is unresponsive. Attempting to reconnect...");
 					while (true) {
@@ -490,8 +343,9 @@ void NfcManager::handleTagPresence(const std::vector<uint8_t>& uid, const std::a
 
     // Check for success SW1=0x90, SW2=0x00
     if (ok && response.size() >= 2 && response[response.size() - 2] == 0x90 && response[response.size() - 1] == 0x00) {
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, response.data(), response.size(), ESP_LOG_DEBUG);
         ESP_LOGI(TAG, "HomeKey applet selected successfully.");
-        handleHomeKeyAuth();
+        handleHomeKeyAuth(response);
     } else {
         ESP_LOGI(TAG, "Not a HomeKey tag, or failed to select applet.");
         ESP_LOGD(TAG, "Passive target UID: %s (%zu)", fmt::format("{:02X}", fmt::join(uid, "")).c_str(), uid.size());
@@ -544,20 +398,20 @@ void NfcManager::waitForTagRemoval() {
  * Performs the configured HomeKey authentication flow for the active tag and publishes a HOMEKEY_TAP
  * event describing the outcome. On successful authentication, stored reader data may be updated.
  *
- * If HomeKey precomputation is enabled, a precomputed authentication context may be consumed (when
- * generation matches current reader data); otherwise a fresh ("cold") authentication context is used.
+ * If HomeKey precomputation is enabled, a precomputed authentication session may be consumed (when
+ * generation matches current reader data); otherwise a fresh ("cold") authentication session is used.
  *
- * Side effects: may update ReaderDataManager, publish a HOMEKEY_TAP event on the NFC bus, notify the
- * auth precompute task, and modify internal auth-cache queues.
+ * Side effects: may update ReaderDataManager, publish a HOMEKEY_TAP event on the NFC bus, and
+ * reset the consumed precomputed session (rebuilt by the polling task).
  */
-void NfcManager::handleHomeKeyAuth() {
+void NfcManager::handleHomeKeyAuth(const std::vector<uint8_t>& select_response) {
     auto publishAuthResult = [](
-        const AuthContextResult& authResult,
+        const ddk::AuthOutcome& authResult,
         const std::vector<uint8_t>& readerId
     ) {
-        if (authResult.flow != kFlowFailed) {
+        if (authResult.state != ddk::FlowState::Failed) {
             ESP_LOGI(TAG, "HomeKey authentication successful!");
-            EventHKTap s{.status = true, .issuerId = authResult.issuer_id, .endpointId = authResult.endpoint_id, .readerId = readerId };
+            EventHKTap s{.status = true, .issuerId = authResult.issuer->id, .endpointId = authResult.endpoint->id, .readerId = readerId };
             std::vector<uint8_t> d;
             alpaca::serialize(s, d);
             NfcEvent event{.type=HOMEKEY_TAP, .data=d};
@@ -576,80 +430,44 @@ void NfcManager::handleHomeKeyAuth() {
         }
     };
 
-    auto authenticateCold = [this, &publishAuthResult]() {
-        readerData_t readerData = m_readerDataManager.getReaderDataCopy();
+    auto runAuth = [&](ddk::Profile& profile, ddk::Session& session) {
+        auto startTime = std::chrono::high_resolution_clock::now();
+        auto err = profile.validate_select(session, select_response);
+        if (err != ddk::FailureReason::None) {
+          ESP_LOGE(TAG, "Profile Rejected SELECT Response");
+          return;
+        }
+        auto state = ddk::FlowState::Selected;
+        while (state != ddk::FlowState::Done && state != ddk::FlowState::Failed) {
+            state = profile.step(session, state);
+        }
 
-        // IMPORTANT: HKAuthenticationContext stores references to std::function objects.
-        // Do NOT pass lambdas directly (would bind to temporaries and dangle).
-        std::function<bool(std::vector<uint8_t>&, std::vector<uint8_t>&, bool)> nfcFn =
-            [this](std::vector<uint8_t>& send, std::vector<uint8_t>& recv, bool isLong) -> bool {
-                if (!m_reader || send.size() > 255) {
-                    return false;
-                }
-                return m_reader->exchangeApdu(send, recv, isLong ? 1000 : 500);
-            };
-        std::function<void(const readerData_t&)> saveFn = [this](const readerData_t& data) {
-            m_readerDataManager.updateReaderData(data);
-            invalidateAuthCache();
-        };
-        DDKAuthenticationContext authCtx(kHomeKey, nfcFn, readerData, saveFn);
-        auto authResult = authCtx.authenticate(authFlow);
-        publishAuthResult(authResult, readerData.reader_id);
+        auto outcome = profile.finalize(session);
+        if (outcome) {
+            ESP_LOGI(TAG, "Endpoint authenticated in %lli ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - startTime).count());
+            publishAuthResult(outcome, m_readerDataManager.reader_identity().sub_identifier);
+            profile.control_flow(session, 0x01, 0x00);
+        } else {
+            profile.control_flow(session, 0x00, 0x00);
+        }
     };
 
-    if (!m_hkAuthPrecomputeEnabled) {
-        authenticateCold();
-        return;
-    }
+    auto authenticateCold = [&]() {
+        auto session = buildAuthSession();
+        auto profile = ddk::homekey::make_profile();
+        runAuth(*profile, *session);
+    };
 
-    const UBaseType_t readyBefore = m_authCtxReadyQueue ? uxQueueMessagesWaiting(m_authCtxReadyQueue) : 0;
-    const UBaseType_t freeBefore = m_authCtxFreeQueue ? uxQueueMessagesWaiting(m_authCtxFreeQueue) : 0;
-    const uint32_t genNow = m_readerDataGeneration.load(std::memory_order_relaxed);
-
-    AuthCtxCacheItem* item = nullptr;
-    bool gotCached = false;
-    if (m_authCtxReadyQueue && xQueueReceive(m_authCtxReadyQueue, &item, 0) == pdTRUE) {
-      if (item && item->ctx) {
-        gotCached = true;
-      } else if (item) {
-        ESP_LOGW(TAG, "Auth cache item dequeued without context, returning to free queue.");
-        if (m_authCtxFreeQueue) {
-          xQueueSend(m_authCtxFreeQueue, &item, 0);
+    if (m_hkAuthPrecomputeEnabled) {
+        const uint32_t genNow = m_readerDataGeneration.load(std::memory_order_relaxed);
+        if (m_cachedSession && m_cachedSessionGeneration == genNow) {
+            ESP_LOGI(TAG, "Auth cache hit (gen=%u).", genNow);
+            auto profile = ddk::homekey::make_profile();
+            runAuth(*profile, *m_cachedSession);
+            m_cachedSession.reset();
+            return;
         }
-        item = nullptr;
-      }
-    }
-
-    if (gotCached) {
-      const bool genMatch = (item->generation == genNow);
-      if (!genMatch) {
-        ESP_LOGW(TAG, "Auth cache stale (itemGen=%u, genNow=%u) -> cold init.", item->generation, genNow);
-        delete item->ctx;
-        item->ctx = nullptr;
-        xQueueSend(m_authCtxFreeQueue, &item, 0);
-        item = nullptr;
-      } else {
-        const UBaseType_t readyAfter = uxQueueMessagesWaiting(m_authCtxReadyQueue);
-        const UBaseType_t freeAfter = m_authCtxFreeQueue ? uxQueueMessagesWaiting(m_authCtxFreeQueue) : 0;
-        ESP_LOGI(TAG, "Auth cache hit (gen=%u, free=%u->%u, ready=%u->%u).",
-                 genNow, freeBefore, freeAfter, readyBefore, readyAfter);
-        if (m_authPrecomputeTaskHandle) {
-          xTaskNotifyGive(m_authPrecomputeTaskHandle);
-        }
-
-        auto authResult = item->ctx->authenticate(authFlow);
-        const auto readerId = item->readerData.reader_id;
-        delete item->ctx;
-        item->ctx = nullptr;
-        xQueueSend(m_authCtxFreeQueue, &item, 0);
-        publishAuthResult(authResult, readerId);
-        return;
-      }
-    }
-
-    ESP_LOGI(TAG, "Auth cache miss (gen=%u, free=%u, ready=%u) -> cold init.", genNow, freeBefore, readyBefore);
-    if (m_authPrecomputeTaskHandle) {
-      xTaskNotifyGive(m_authPrecomputeTaskHandle);
+        ESP_LOGI(TAG, "Auth cache miss (gen=%u) -> cold init.", genNow);
     }
     authenticateCold();
 }

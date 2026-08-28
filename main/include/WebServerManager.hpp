@@ -4,7 +4,6 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
-#include "app_event_loop.hpp"
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -14,7 +13,7 @@
 
 // Forward declarations
 class ConfigManager;
-class ReaderDataManager;
+class NvsCredentialStore;
 class SystemManager;
 class MqttManager;
 class NfcManager;
@@ -55,7 +54,7 @@ public:
   // Public Interface
   // ------------------------------------------------------------------------
   WebServerManager(ConfigManager &configManager,
-                   ReaderDataManager &readerDataManager);
+                   NvsCredentialStore &readerDataManager);
   ~WebServerManager();
 
   void begin();
@@ -186,7 +185,7 @@ private:
 
   // Dependencies
   ConfigManager &m_configManager;
-  ReaderDataManager &m_readerDataManager;
+  NvsCredentialStore &m_readerDataManager;
   MqttManager *m_mqttManager;
   NfcManager *m_nfcManager;
 

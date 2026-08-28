@@ -1,13 +1,11 @@
 #pragma once
-#include "DDKReaderData.h"
+#include "ddk/session/Flow.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <expected>
-#include <functional>
 #include <map>
 #include <memory>
 #include "app_event_loop.hpp"
@@ -16,10 +14,10 @@
 
 class LockManager;
 class HardwareManager;
-class ReaderDataManager;
+class NvsCredentialStore;
 class MqttManager;
-class DDKAuthenticationContext;
 namespace espConfig { struct misc_config_t; }
+namespace ddk { class Session; }
 
 enum ReaderType : uint8_t {
   PN532,
@@ -29,7 +27,7 @@ enum ReaderType : uint8_t {
 
 class NfcManager {
 public:
-    NfcManager(ReaderDataManager& readerDataManager,
+    NfcManager(NvsCredentialStore& readerDataManager,
                const std::array<uint8_t, 4> &nfcGpioPins,
                uint8_t nfcReaderType,
                uint8_t nfcIrqPin,
@@ -42,7 +40,7 @@ public:
      * The HomeKey event subscription (m_hk_event) is automatically unregistered
      * when NfcManager is destroyed, via SubscriptionHandle's RAII cleanup.
      */
-    ~NfcManager() = default;
+    ~NfcManager();
     bool begin();
 
 private:
@@ -51,28 +49,17 @@ private:
     static void pollingTaskEntry(void* instance);
     void pollingTask();
 
-    // --- HomeKey Auth Cache (precompute) ---
-    struct AuthCtxCacheItem {
-        readerData_t readerData;
-        std::function<bool(std::vector<uint8_t>&, std::vector<uint8_t>&, bool)> nfcFn;
-        std::function<void(const readerData_t&)> saveFn;
-        DDKAuthenticationContext* ctx = nullptr;
-        uint32_t generation = 0;
-    };
-
-    // Keep exactly one precomputed context ready for the next tap, and one extra slot to
-    // allow generating the next context while a tap is being processed.
-    static constexpr size_t kAuthCtxCacheSize = 1;
-    static constexpr size_t kAuthCtxPoolSize = 2;
-    static void authPrecomputeTaskEntry(void* instance);
-    void authPrecomputeTask();
-    void initAuthPrecompute();
+    // --- HomeKey Auth Session Precompute ---
+    // The polling task is the sole owner of the cached session; event tasks only
+    // bump m_readerDataGeneration so the next loop iteration rebuilds it with
+    // fresh store data / auth flow.
     void invalidateAuthCache();
+    std::unique_ptr<ddk::Session> buildAuthSession();
 
     // --- Core NFC Logic ---
     bool initializeReader();
     void handleTagPresence(const std::vector<uint8_t>& uid, const std::array<uint8_t,2>& atqa, const uint8_t& sak);
-    void handleHomeKeyAuth();
+    void handleHomeKeyAuth(const std::vector<uint8_t>& select_response);
     void handleGenericTag(const std::vector<uint8_t>& uid, const std::array<uint8_t,2>& atqa, const uint8_t& sak);
     void waitForTagRemoval();
 
@@ -83,28 +70,23 @@ private:
     uint8_t m_nfcVenPin;
     std::unique_ptr<INfcReader> m_reader;
 
-    ReaderDataManager& m_readerDataManager;
-    const bool m_hkAuthPrecomputeEnabled;
+    NvsCredentialStore& m_readerDataManager;
+    bool m_hkAuthPrecomputeEnabled = false;
     const bool m_nfcFastPollingEnabled;
 
     TaskHandle_t m_pollingTaskHandle;
     TaskHandle_t m_retryTaskHandle;
-    TaskHandle_t m_authPrecomputeTaskHandle = nullptr;
 
-    QueueHandle_t m_authCtxFreeQueue = nullptr;
-    QueueHandle_t m_authCtxReadyQueue = nullptr;
-    AuthCtxCacheItem m_authPool[kAuthCtxPoolSize];
+    std::unique_ptr<ddk::Session> m_cachedSession;
+    uint32_t m_cachedSessionGeneration = 0;
     std::atomic<uint32_t> m_readerDataGeneration{0};
 
     std::array<uint8_t, 18> m_ecpData;
 
-    KeyFlow authFlow = KeyFlow::kFlowFAST;
+    ddk::Flow authFlow = ddk::Flow::Fast;
 
     static const char* TAG;
     AppEventLoop::SubscriptionHandle m_hk_event;
-    // Stack for the hk_auth_precompute task. mbedTLS P-256 key generation was
-    // measured using 4056-4288 bytes, so 4096 was not survivable.
-    static constexpr uint32_t kAuthPrecomputeStackBytes = 6144;
 
     enum PinFunctions {
       SCK,

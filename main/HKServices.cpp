@@ -1,4 +1,4 @@
-#include "DDKReaderData.h"
+#include "ddk/homekey/HapTags.h"
 #include "config.hpp"
 #include "eventStructs.hpp"
 #include "HomeKitLock.hpp"
@@ -143,7 +143,7 @@ boolean HomeKitLock::LockMechanismService::update() {
  *
  * @param readerDataManager Reference to the ReaderDataManager used to persist and manage NFC reader data.
  */
-HomeKitLock::NFCAccessService::NFCAccessService(ReaderDataManager& readerDataManager) : m_readerDataManager(readerDataManager) {
+HomeKitLock::NFCAccessService::NFCAccessService(NvsCredentialStore& readerDataManager) : m_readerDataManager(readerDataManager) {
     ESP_LOGI(HomeKitLock::TAG, "Configuring NFCAccess");
     new Characteristic::ConfigurationState();
     TLV8 conf(nullptr, 0);
@@ -166,11 +166,9 @@ boolean HomeKitLock::NFCAccessService::update() {
     ctrlData.pack(tlvData.data());
     if (tlvData.empty()) return true;
 
-    auto saveCallback = [this](const readerData_t& data) { return m_readerDataManager.updateReaderData(data); };
     auto remove_key_cb = [this]() { return m_readerDataManager.eraseReaderKey(); };
-    readerData_t readerDataCopy = m_readerDataManager.getReaderDataCopy();
 
-    HK_HomeKit hkCtx(readerDataCopy, saveCallback, remove_key_cb, tlvData);
+    HK_HomeKit hkCtx(m_readerDataManager, remove_key_cb, tlvData);
     std::vector<uint8_t> result = hkCtx.processResult();
 
     TLV8 res(NULL, 0);

@@ -1,3 +1,4 @@
+#include "DDKReaderData.h"
 #include "HardwareManager.hpp"
 #include "fmt/ranges.h"
 #include "config.hpp"
@@ -14,7 +15,6 @@
 #include "LockManager.hpp"
 #include "ConfigManager.hpp"
 #include "ReaderDataManager.hpp"
-#include "HK_HomeKit.h"
 #include "esp_mac.h"
 #include "hal/spi_types.h"
 #include "utils.hpp"
@@ -34,7 +34,7 @@ static HomeKitLock* s_instance = nullptr;
  * @param configManager Reference to the ConfigManager used for configuration access.
  * @param readerDataManager Reference to the ReaderDataManager used to manage reader/issuer data.
  */
-HomeKitLock::HomeKitLock(std::function<void(int)> &conn_cb, LockManager& lockManager, ConfigManager& configManager, ReaderDataManager& readerDataManager)
+HomeKitLock::HomeKitLock(std::function<void(int)> &conn_cb, LockManager& lockManager, ConfigManager& configManager, NvsCredentialStore& readerDataManager)
     : m_lockManager(lockManager),
       m_configManager(configManager),
       m_readerDataManager(readerDataManager),
@@ -490,16 +490,15 @@ void HomeKitLock::setupDebugCommands() {
     });
 
     new SpanUserCommand('P', "Print Issuers", [](const char* c) {
-        const auto readerDataCopy = s_instance->m_readerDataManager.getReaderDataCopy();
-        const auto& issuers = readerDataCopy.issuers;
+        const auto& issuers = s_instance->m_readerDataManager.issuers();
         ESP_LOGI(TAG, "--- Registered HomeKey Issuers ---");
         if (issuers.empty()) {
             ESP_LOGI(TAG, "None");
         }
         for(const auto& issuer : issuers) {
              ESP_LOGI(TAG, "ID: %s, PK: %s",
-                 fmt::format("{:02X}", fmt::join(issuer.issuer_id, "")).c_str(),
-                 fmt::format("{:02X}", fmt::join(issuer.issuer_pk, "")).c_str());
+                 fmt::format("{:02X}", fmt::join(issuer.id, "")).c_str(),
+                 fmt::format("{:02X}", fmt::join(issuer.public_key, "")).c_str());
         }
         ESP_LOGI(TAG, "------------------------------------");
     });
@@ -610,15 +609,15 @@ void HomeKitLock::controllerCallback() {
     // Remove any stored issuers that no longer correspond to a paired controller.
     // Iterate over a snapshot copy since removeIssuerIfItExists locks internally
     // and may mutate the manager's live issuer list.
-    readerData_t readerDataSnapshot = m_readerDataManager.getReaderDataCopy();
-    for (const auto& issuer : readerDataSnapshot.issuers) {
+    auto readerDataSnapshot = m_readerDataManager.issuers();
+    for (const auto& issuer : readerDataSnapshot) {
         bool stillPaired = std::any_of(currentIssuerIds.begin(), currentIssuerIds.end(),
             [&issuer](const std::vector<uint8_t>& id) {
-                return issuer.issuer_id.size() == id.size() &&
-                       std::equal(issuer.issuer_id.begin(), issuer.issuer_id.end(), id.begin());
+                return issuer.id.size() == id.size() &&
+                       std::equal(issuer.id.begin(), issuer.id.end(), id.begin());
             });
         if (!stillPaired) {
-            if (m_readerDataManager.removeIssuerIfItExists(issuer.issuer_id)) {
+            if (m_readerDataManager.removeIssuerIfExists(issuer.id)) {
                 ESP_LOGI(TAG, "Controller unpaired, issuer removed.");
                 dataChanged = true;
             }
@@ -627,8 +626,6 @@ void HomeKitLock::controllerCallback() {
 
     if (dataChanged) {
         ESP_LOGI(TAG, "Issuer list changed, saving reader data to NVS.");
-        if (!m_readerDataManager.saveData()) {
-            ESP_LOGE(TAG, "Failed to save updated reader data after controller list change!");
-        }
+        m_readerDataManager.save();
     }
 }
