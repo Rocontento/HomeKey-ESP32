@@ -27,6 +27,7 @@
 #include "eventStructs.hpp"
 #include "freertos/idf_additions.h"
 #include "loggable.hpp"
+#include "portmacro.h"
 #include "sodium/randombytes.h"
 #include <LittleFS.h>
 #include <algorithm>
@@ -256,9 +257,15 @@ void WebServerManager::begin() {
     m_server = nullptr;
     return;
   }
-
-  if (xTaskCreate(ws_send_task, "ws_send_task", 4096, this, 2,
-                  &m_wsTaskHandle) != pdPASS) {
+BaseType_t task;
+#ifndef CONFIG_FREERTOS_UNICORE
+    task = xTaskCreatePinnedToCore(ws_send_task, "ws_send_task", 4096, this, 2,
+                      &m_wsTaskHandle, 1);
+#else
+    task = xTaskCreate(ws_send_task, "ws_send_task", 4096, this, 2,
+                      &m_wsTaskHandle);
+#endif
+  if (task != pdPASS) {
     ESP_LOGE(TAG, "Failed to create WebSocket task");
     vQueueDelete(m_wsQueue);
     httpd_stop(m_server);
@@ -1609,7 +1616,13 @@ esp_err_t WebServerManager::handleSaveCaptivePortalConfig(httpd_req_t *req) {
       .cleaned_body_str = cleaned_body_str
     };
 
-    if (xTaskCreate(captivePortalSaveTask, "wifi_save_task", 8192, params, 5, nullptr) != pdPASS) {
+BaseType_t task;
+#ifndef CONFIG_FREERTOS_UNICORE
+    task = xTaskCreatePinnedToCore(captivePortalSaveTask, "wifi_save_task", 8192, params, 5, nullptr, 1);
+#else
+    task = xTaskCreate(captivePortalSaveTask, "wifi_save_task", 8192, params, 5, nullptr);
+#endif
+    if (task != pdPASS) {
       ESP_LOGE(TAG, "Failed to create WiFi save task");
       delete params;
       httpd_req_async_handler_complete(reqCopy);
@@ -2123,7 +2136,13 @@ esp_err_t WebServerManager::handleOTAUpload(httpd_req_t *req) {
   OTAParams *params = new OTAParams{reqCopy, instance, uploadType, skipReboot, req->content_len, new OTAState()};
   params->state->inProgress = true;
 
-  if (xTaskCreate(otaTask, "ota_task", 8192, params, 5, NULL) != pdPASS) {
+BaseType_t task;
+#ifndef CONFIG_FREERTOS_UNICORE
+    task = xTaskCreatePinnedToCore(otaTask, "ota_task", 8192, params, 5, NULL, 1);
+#else
+    task = xTaskCreate(otaTask, "ota_task", 8192, params, 5, NULL);
+#endif
+  if (task != pdPASS) {
     ESP_LOGE(TAG, "Failed to create OTA task");
     delete params->state;
     delete params;
