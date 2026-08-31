@@ -1,4 +1,3 @@
-#include "DDKReaderData.h"
 #include "HardwareManager.hpp"
 #include "fmt/ranges.h"
 #include "config.hpp"
@@ -437,19 +436,19 @@ void HomeKitLock::setupDebugCommands() {
       esp_log_level_set("*", level);
     });
     new SpanUserCommand('F', "Set HomeKey Flow", [](const char *buf){
-      KeyFlow hkFlow = KeyFlow::kFlowFAST;
+      ddk::KeyFlow hkFlow = ddk::KeyFlow::kFlowFAST;
       switch (buf[1]) {
       case '0':
-        hkFlow = KeyFlow::kFlowFAST;
+        hkFlow = ddk::KeyFlow::kFlowFAST;
         ESP_LOGI(TAG, "FAST Flow");
         break;
 
       case '1':
-        hkFlow = KeyFlow::kFlowSTANDARD;
+        hkFlow = ddk::KeyFlow::kFlowSTANDARD;
         ESP_LOGI(TAG, "STANDARD Flow");
         break;
       case '2':
-        hkFlow = KeyFlow::kFlowATTESTATION;
+        hkFlow = ddk::KeyFlow::kFlowATTESTATION;
         ESP_LOGI(TAG, "ATTESTATION Flow");
         break;
 

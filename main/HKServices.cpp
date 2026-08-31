@@ -1,4 +1,3 @@
-#include "ddk/homekey/HapTags.h"
 #include "config.hpp"
 #include "eventStructs.hpp"
 #include "HomeKitLock.hpp"
@@ -174,7 +173,7 @@ boolean HomeKitLock::NFCAccessService::update() {
     TLV8 res(NULL, 0);
     if (!result.empty()) {
         res.unpack(result.data(), result.size());
-        if(auto it = res.find(kReader_Reader_Key_Response); res.len(it) == 3){
+        if(auto it = res.find(0x07); res.len(it) == 3){
             HomekitEvent event{.type=ACCESSDATA_CHANGED, .data={}};
             std::vector<uint8_t> event_data;
             alpaca::serialize(event, event_data);
