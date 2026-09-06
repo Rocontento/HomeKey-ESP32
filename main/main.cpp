@@ -174,6 +174,7 @@ void setup() {
   s_miioLock.setCredentials(miscConfig.xiaomiLockIp, miscConfig.xiaomiLockToken, miscConfig.xiaomiLockDid);
   s_miioLock.begin();
   webServerManager->setNfcManager(nfcManager.get());
+  webServerManager->setMiioLock(&s_miioLock);
   webServerManager->setMqttManager(mqttManager.get());
   hardwareManager->begin();
   homekitLock->begin();

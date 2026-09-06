@@ -14,6 +14,7 @@ class ReaderDataManager;
 class SystemManager;
 class MqttManager;
 class NfcManager;
+class MiioLock;
 namespace loggable {
 class WebSocketLogSinker;
 }
@@ -66,6 +67,7 @@ public:
   bool basicAuth(httpd_req_t* req);
   void setMqttManager(MqttManager *mqttManager) { m_mqttManager = mqttManager; }
   void setNfcManager(NfcManager *nfcManager) { m_nfcManager = nfcManager; }
+  void setMiioLock(MiioLock *miioLock) { m_miioLock = miioLock; }
   void broadcastWs(const uint8_t *payload, size_t len, httpd_ws_type_t type);
 
 private:
@@ -103,6 +105,9 @@ private:
   static esp_err_t handleCertificateUpload(httpd_req_t *req);
   static esp_err_t handleCertificateStatus(httpd_req_t *req);
   static esp_err_t handleCertificateDelete(httpd_req_t *req);
+  static esp_err_t handleXiaomiLogin(httpd_req_t *req);
+  static esp_err_t handleXiaomiSelect(httpd_req_t *req);
+  static esp_err_t handleXiaomiTest(httpd_req_t *req);
 
   static esp_err_t handleCaptivePortal(httpd_req_t *req);
   static esp_err_t handleGetCaptivePortalConfig(httpd_req_t *req);
@@ -152,6 +157,7 @@ private:
   ReaderDataManager &m_readerDataManager;
   MqttManager *m_mqttManager;
   NfcManager *m_nfcManager;
+  MiioLock *m_miioLock = nullptr;
 
   // WebSocket infrastructure
   QueueHandle_t m_wsQueue;

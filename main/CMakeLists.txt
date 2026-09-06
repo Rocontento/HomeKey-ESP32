@@ -1,9 +1,9 @@
 idf_component_register(SRCS "main.cpp" "app_events.cpp" "app_event_loop.cpp" "ConfigManager.cpp" "ReaderDataManager.cpp"
                     "HardwareManager.cpp" "HomeKitLock.cpp" "LockManager.cpp"
                     "MqttManager.cpp" "HKServices.cpp" "NfcManager.cpp" "WebServerManager.cpp" "WebSocketLogSinker.cpp"
-                    "ConsoleLogSinker.cpp" "PowerManager.cpp" "MiioLock.cpp"
+                    "ConsoleLogSinker.cpp" "PowerManager.cpp" "MiioLock.cpp" "XiaomiCloud.cpp"
                     INCLUDE_DIRS "include"
-                    PRIV_REQUIRES HomeSpan pn532_hal DigitalDoorKey esp_https_server mqtt libsodium
+                    PRIV_REQUIRES HomeSpan pn532_hal DigitalDoorKey esp_https_server mqtt libsodium esp_http_client mbedtls
                     msgpack-c json loggable loggable_espidf esp_wifi dns_server)
 
 include(FetchContent)
