@@ -107,7 +107,11 @@ ConfigManager::ConfigManager() : m_isInitialized(false) {
       {"ethSpiBus", &m_miscConfig.ethSpiBus},
       {"ethRmiiConfig", &m_miscConfig.ethRmiiConfig},
       {"ethSpiConfig", &m_miscConfig.ethSpiConfig},
-      {"logLevel", &m_miscConfig.logLevel}
+      {"logLevel", &m_miscConfig.logLevel},
+      {"xiaomiLockIp", &m_miscConfig.xiaomiLockIp},
+      {"xiaomiLockToken", &m_miscConfig.xiaomiLockToken},
+      {"xiaomiLockDid", &m_miscConfig.xiaomiLockDid},
+      {"xiaomiUnlatchAiid", &m_miscConfig.xiaomiUnlatchAiid}
     }
     },
     {
