@@ -32,8 +32,30 @@ Three values, stored in the `misc` config (NVS) like every other setting:
 | `xiaomiLockDid` | numeric device id |
 | `xiaomiUnlatchAiid` | `4` (default) or `9` |
 
-They can be set from the web portal's Xiaomi login (which pulls them from the Xiaomi
-account), or written by hand through the config API.
+### From the web portal
+
+Open **Xiaomi lock** in the portal, pick your server region, and log in with the Xiaomi
+account the lock is registered to. The device list comes back with each device's local
+token; press **Use** on the lock, then **Save**. **Test unlatch now** fires one command
+so you can confirm it works without walking to the door.
+
+The password is used for that one login and is never stored — only the selected lock's
+ip/token/did are written to NVS. If the account has two-factor enabled, the portal shows
+the verification URL: open it once in a browser, confirm, then log in again.
+
+Endpoints behind the page (all under the portal's basic auth):
+
+| endpoint | purpose |
+|----------|---------|
+| `POST /xiaomi/login` | log in, return devices with tokens |
+| `POST /xiaomi/select` | store the chosen lock, apply it live |
+| `POST /xiaomi/test` | fire one unlatch |
+
+### By hand
+
+The same three fields can be typed into the form, or PUT through the normal config API,
+if you would rather run [Xiaomi-cloud-tokens-extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor)
+yourself and never give the firmware your password.
 
 Not sure which aiid your unit wants? Turn on debug logging for `xiaomi_miot` in Home
 Assistant, press the button that already works, and read the line
@@ -56,6 +78,17 @@ miIO packet: `0x2131 | len | 0000 0000 | device_id | stamp | md5(header+token+da
 where `data` is AES-128-CBC(`key=md5(token)`, `iv=md5(key+token)`) over the JSON payload
 plus a trailing NUL, PKCS7-padded. `MiioLock::selftest()` runs at boot and checks the
 packer against a known-answer vector generated with openssl; a failure is logged loudly.
+
+## Cloud login flow
+
+`XiaomiCloud` mirrors the reference implementations: `serviceLogin` for a `_sign`,
+`serviceLoginAuth2` with `MD5(password)` for `ssecurity` + a location URL, a GET on that
+location to pick up the `serviceToken` cookie, then `/home/device_list` signed the way
+Xiaomi wants it — SHA1 over the ordered parameters, values RC4-encrypted with a key
+derived as `SHA256(ssecurity || nonce)` and the customary 1024-byte RC4 warm-up.
+
+It only runs when you press the login button. Nothing polls the cloud, and unlocking
+never touches it.
 
 ## Not done yet
 
