@@ -2,6 +2,9 @@
 // WebServerManager.cpp - ESP32 Web Server Implementation
 // ============================================================================
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_https_server.h"
 #include "esp_system.h"
 #include "app_event_loop.hpp"
@@ -11,6 +14,8 @@
 #include "HomeSpan.h"
 #include "MqttManager.hpp"
 #include "NfcManager.hpp"
+#include "MiioLock.hpp"
+#include "XiaomiCloud.hpp"
 #include "ReaderDataManager.hpp"
 #include "cJSON.h"
 #include "config.hpp"
@@ -304,6 +309,11 @@ void WebServerManager::setupRoutes() {
 
       // WebSocket
       {"/ws", HTTP_GET, handleWebSocket, this, true},
+
+      // Xiaomi lock endpoints
+      {"/xiaomi/login", HTTP_POST, handleXiaomiLogin, this},
+      {"/xiaomi/select", HTTP_POST, handleXiaomiSelect, this},
+      {"/xiaomi/test", HTTP_POST, handleXiaomiTest, this},
 
       // Certificate endpoints
       {"/certificates", HTTP_POST, handleCertificateUpload, this},
@@ -2223,4 +2233,203 @@ esp_err_t WebServerManager::handleCertificateDelete(httpd_req_t *req) {
   std::string response = cjson_to_string_and_free(res);
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_FAIL;
+}
+
+// ============================================================================
+// Xiaomi Lock Handlers
+// ============================================================================
+
+namespace {
+
+esp_err_t sendJsonError(httpd_req_t *req, const char *status, const char *message,
+                        const char *twoFactorUrl = nullptr) {
+  httpd_resp_set_status(req, status);
+  httpd_resp_set_type(req, "application/json");
+  cJSON *res = cJSON_CreateObject();
+  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(false));
+  cJSON_AddItemToObject(res, "error", cJSON_CreateString(message));
+  if (twoFactorUrl && *twoFactorUrl)
+    cJSON_AddItemToObject(res, "twoFactorUrl", cJSON_CreateString(twoFactorUrl));
+  std::string response = cjson_to_string_and_free(res);
+  httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
+  return ESP_FAIL;
+}
+
+// Reads the whole body into a NUL-terminated buffer. Returns false and answers the
+// request itself on any problem.
+bool readJsonBody(httpd_req_t *req, std::vector<char> &out, size_t limit = 1024) {
+  if (req->content_len == 0 || req->content_len >= limit) {
+    sendJsonError(req, "400 Bad Request", "Missing or oversized request body");
+    return false;
+  }
+  out.assign(limit, 0);
+  int ret = httpd_req_recv(req, out.data(), out.size() - 1);
+  if (ret <= 0) {
+    sendJsonError(req, "400 Bad Request", "Invalid request body");
+    return false;
+  }
+  out[ret] = '\0';
+  return true;
+}
+
+std::string jsonStr(const cJSON *obj, const char *key) {
+  const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+  return cJSON_IsString(v) && v->valuestring ? v->valuestring : "";
+}
+
+struct XiaomiLoginJob {
+  std::string user, pass, region;
+  std::vector<XiaomiDevice> devices;
+  std::string err, twoFactorUrl;
+  bool ok = false;
+  SemaphoreHandle_t done = nullptr;
+};
+
+// The login is TLS-heavy; the httpd task only has 6 kB of stack, so it runs here.
+void xiaomiLoginTask(void *arg) {
+  auto *job = static_cast<XiaomiLoginJob *>(arg);
+  XiaomiCloud cloud;
+  job->ok = cloud.loginAndListDevices(job->user, job->pass, job->region, job->devices, job->err);
+  job->twoFactorUrl = cloud.twoFactorUrl();
+  xSemaphoreGive(job->done);
+  vTaskDelete(nullptr);
+}
+
+bool isHexToken(const std::string &t) {
+  return t.size() == 32 && t.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+}
+
+}  // namespace
+
+/**
+ * @brief POST /xiaomi/login - logs into the Xiaomi account and returns the devices
+ *        with their local tokens. The password is used once and never stored.
+ */
+esp_err_t WebServerManager::handleXiaomiLogin(httpd_req_t *req) {
+  WebServerManager *instance = getInstance(req);
+  if (!instance) { httpd_resp_send_500(req); return ESP_FAIL; }
+  if (!instance->basicAuth(req)) return sendAuthFailure(req);
+
+  std::vector<char> content;
+  if (!readJsonBody(req, content)) return ESP_FAIL;
+
+  cJSON *obj = cJSON_Parse(content.data());
+  if (!obj) return sendJsonError(req, "400 Bad Request", "Invalid JSON");
+
+  XiaomiLoginJob job;
+  job.user = jsonStr(obj, "username");
+  job.pass = jsonStr(obj, "password");
+  job.region = jsonStr(obj, "region");
+  cJSON_Delete(obj);
+
+  if (job.user.empty() || job.pass.empty())
+    return sendJsonError(req, "400 Bad Request", "Username and password are required");
+  if (job.region.empty()) job.region = "de";
+
+  job.done = xSemaphoreCreateBinary();
+  if (!job.done) return sendJsonError(req, "500 Internal Server Error", "Out of memory");
+
+  // 12 kB: TLS handshake plus the RC4/JSON work.
+  if (xTaskCreate(xiaomiLoginTask, "xiaomiLogin", 12288, &job, 5, nullptr) != pdPASS) {
+    vSemaphoreDelete(job.done);
+    return sendJsonError(req, "500 Internal Server Error", "Could not start login task");
+  }
+  xSemaphoreTake(job.done, portMAX_DELAY);  // the task always gives it; HTTP timeouts bound it
+  vSemaphoreDelete(job.done);
+
+  if (!job.ok) {
+    ESP_LOGW("WebServer", "Xiaomi login failed: %s", job.err.c_str());
+    return sendJsonError(req, "401 Unauthorized", job.err.c_str(), job.twoFactorUrl.c_str());
+  }
+
+  cJSON *res = cJSON_CreateObject();
+  cJSON_AddItemToObject(res, "success", cJSON_CreateBool(true));
+  cJSON *list = cJSON_CreateArray();
+  for (const auto &d : job.devices) {
+    cJSON *e = cJSON_CreateObject();
+    cJSON_AddItemToObject(e, "name", cJSON_CreateString(d.name.c_str()));
+    cJSON_AddItemToObject(e, "model", cJSON_CreateString(d.model.c_str()));
+    cJSON_AddItemToObject(e, "did", cJSON_CreateString(d.did.c_str()));
+    cJSON_AddItemToObject(e, "token", cJSON_CreateString(d.token.c_str()));
+    cJSON_AddItemToObject(e, "ip", cJSON_CreateString(d.ip.c_str()));
+    cJSON_AddItemToObject(e, "online", cJSON_CreateBool(d.online));
+    cJSON_AddItemToArray(list, e);
+  }
+  cJSON_AddItemToObject(res, "devices", list);
+  httpd_resp_set_type(req, "application/json");
+  std::string response = cjson_to_string_and_free(res);
+  httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+
+/**
+ * @brief POST /xiaomi/select - stores the chosen lock's ip/token/did and applies them live.
+ */
+esp_err_t WebServerManager::handleXiaomiSelect(httpd_req_t *req) {
+  WebServerManager *instance = getInstance(req);
+  if (!instance) { httpd_resp_send_500(req); return ESP_FAIL; }
+  if (!instance->basicAuth(req)) return sendAuthFailure(req);
+
+  std::vector<char> content;
+  if (!readJsonBody(req, content)) return ESP_FAIL;
+
+  cJSON *obj = cJSON_Parse(content.data());
+  if (!obj) return sendJsonError(req, "400 Bad Request", "Invalid JSON");
+
+  const std::string ip = jsonStr(obj, "ip");
+  const std::string token = jsonStr(obj, "token");
+  const std::string did = jsonStr(obj, "did");
+  const cJSON *aiidItem = cJSON_GetObjectItemCaseSensitive(obj, "aiid");
+  const int aiid = cJSON_IsNumber(aiidItem) ? aiidItem->valueint : 4;
+  cJSON_Delete(obj);
+
+  if (ip.empty() || did.empty())
+    return sendJsonError(req, "400 Bad Request", "ip and did are required");
+  if (!isHexToken(token))
+    return sendJsonError(req, "400 Bad Request", "token must be 32 hex characters");
+  if (aiid <= 0 || aiid > 255)
+    return sendJsonError(req, "400 Bad Request", "aiid out of range");
+
+  cJSON *upd = cJSON_CreateObject();
+  cJSON_AddItemToObject(upd, "xiaomiLockIp", cJSON_CreateString(ip.c_str()));
+  cJSON_AddItemToObject(upd, "xiaomiLockToken", cJSON_CreateString(token.c_str()));
+  cJSON_AddItemToObject(upd, "xiaomiLockDid", cJSON_CreateString(did.c_str()));
+  cJSON_AddItemToObject(upd, "xiaomiUnlatchAiid", cJSON_CreateNumber(aiid));
+  const std::string updJson = cjson_to_string_and_free(upd);
+
+  instance->m_configManager.updateFromJson<espConfig::misc_config_t>(updJson);
+  if (!instance->m_configManager.saveConfig<espConfig::misc_config_t>())
+    return sendJsonError(req, "500 Internal Server Error", "Could not save configuration");
+
+  if (instance->m_miioLock) {
+    instance->m_miioLock->unlatch_aiid = aiid;
+    instance->m_miioLock->setCredentials(ip, token, did);
+  }
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_sendstr(req, "{\"success\":true}");
+  return ESP_OK;
+}
+
+/**
+ * @brief POST /xiaomi/test - fires the configured unlatch once, so the user can verify
+ *        the credentials without walking to the door with a phone.
+ */
+esp_err_t WebServerManager::handleXiaomiTest(httpd_req_t *req) {
+  WebServerManager *instance = getInstance(req);
+  if (!instance) { httpd_resp_send_500(req); return ESP_FAIL; }
+  if (!instance->basicAuth(req)) return sendAuthFailure(req);
+  if (!instance->m_miioLock)
+    return sendJsonError(req, "503 Service Unavailable", "Xiaomi lock support not initialised");
+  if (!instance->m_miioLock->isConfigured())
+    return sendJsonError(req, "400 Bad Request", "No Xiaomi lock configured yet");
+
+  const bool ok = instance->m_miioLock->callAction(instance->m_miioLock->siid,
+                                                   instance->m_miioLock->unlatch_aiid);
+  if (!ok)
+    return sendJsonError(req, "502 Bad Gateway", "The lock did not accept the command");
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_sendstr(req, "{\"success\":true}");
+  return ESP_OK;
 }

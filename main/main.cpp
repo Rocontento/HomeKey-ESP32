@@ -16,6 +16,7 @@
 #include "MqttManager.hpp"
 #include "WebServerManager.hpp"
 #include "PowerManager.hpp"
+#include "MiioLock.hpp"
 #include <functional>
 #include <sodium/crypto_sign.h>
 #include <sodium/crypto_box.h>
@@ -36,6 +37,7 @@ std::unique_ptr<NfcManager> nfcManager;
 
 static dns_server_handle_t dns_server = NULL;
 static PowerManager s_powerManager;
+static MiioLock s_miioLock;
 
 bool pollHS = false;
 static uint8_t s_wifiDisconnectCount = 0;
@@ -168,7 +170,11 @@ void setup() {
                                 miscConfig.nfcFastPollingEnabled);
     nfcManager->begin();
   }
+  s_miioLock.unlatch_aiid = miscConfig.xiaomiUnlatchAiid;
+  s_miioLock.setCredentials(miscConfig.xiaomiLockIp, miscConfig.xiaomiLockToken, miscConfig.xiaomiLockDid);
+  s_miioLock.begin();
   webServerManager->setNfcManager(nfcManager.get());
+  webServerManager->setMiioLock(&s_miioLock);
   webServerManager->setMqttManager(mqttManager.get());
   hardwareManager->begin();
   homekitLock->begin();
