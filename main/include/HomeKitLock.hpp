@@ -52,6 +52,7 @@ private:
 
     static void staticControllerCallback();
     void controllerCallback();
+    void syncIssuersWithControllers();
     void setupDebugCommands();
 
     static const char* TAG;
