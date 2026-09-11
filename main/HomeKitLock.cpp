@@ -260,6 +260,9 @@ void HomeKitLock::begin() {
     homeSpan.setConnectionCallback(connectionEstablished);
     homeSpan.setConnectionTimes(3, 30, 3);
     homeSpan.setApFunction(apStarted);
+
+    syncIssuersWithControllers();
+
     ESP_LOGI(TAG, "HomeSpan setup complete.");
 }
 
@@ -483,13 +486,38 @@ void HomeKitLock::controllerCallback() {
         m_readerDataManager.deleteAllReaderData();
         return;
     }
+    syncIssuersWithControllers();
+}
+
+/**
+ * @brief Ensure every paired HomeKit controller has a corresponding HomeKey issuer entry.
+ *
+ * Derives the issuer identifier from each paired controller's LTPK and adds any that are missing,
+ * persisting the result to NVS when the set changed. Runs both on controller-list changes and at
+ * startup, so an issuer lost to a failed NVS write is recovered on the next boot rather than
+ * staying missing until the pairing list happens to change again.
+ *
+ * Logs each controller alongside its derived issuer ID so a HomeKey tap that reports an unknown
+ * issuer can be matched against the paired controllers.
+ */
+void HomeKitLock::syncIssuersWithControllers() {
     bool dataChanged = false;
+    size_t controllerCount = 0;
     for (auto it = homeSpan.controllerListBegin(); it != homeSpan.controllerListEnd(); ++it) {
         std::vector<uint8_t> issuerId = Utils::getHashIdentifier(it->getLTPK(), 32);
-        if (m_readerDataManager.addIssuerIfNotExists(issuerId, it->getLTPK())) {
+        bool added = m_readerDataManager.addIssuerIfNotExists(issuerId, it->getLTPK());
+        ESP_LOGI(TAG, "Controller %.36s (%s) -> issuer %s [%s]",
+                 reinterpret_cast<const char*>(it->getID()),
+                 it->isAdmin() ? "admin" : "user",
+                 fmt::format("{:02X}", fmt::join(issuerId, "")).c_str(),
+                 added ? "registered now" : "already known");
+        controllerCount++;
+        if (added) {
             dataChanged = true;
         }
     }
+    ESP_LOGI(TAG, "%zu controller(s) paired, %zu issuer(s) registered.", controllerCount,
+             m_readerDataManager.getReaderDataCopy().issuers.size());
     if(dataChanged) {
         ESP_LOGI(TAG, "New issuers added, saving reader data to NVS.");
         if (!m_readerDataManager.saveData()) {
