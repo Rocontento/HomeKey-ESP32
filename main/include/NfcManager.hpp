@@ -77,6 +77,14 @@ private:
     TaskHandle_t m_pollingTaskHandle;
     TaskHandle_t m_retryTaskHandle;
 
+    // --- Post-transaction cooldown (polling task only) ---
+    enum class TxnOutcome : uint8_t { None, Success, Failure };
+    static constexpr uint32_t kPostSuccessCooldownMs = 1500;
+    static constexpr uint32_t kPostFailureCooldownMs = 400;
+    TxnOutcome m_lastTxnOutcome = TxnOutcome::None;
+    TickType_t m_lastTxnTick = 0;
+    TickType_t m_txnCooldownTicks = 0;
+
     std::unique_ptr<ddk::Session> m_cachedSession;
     uint32_t m_cachedSessionGeneration = 0;
     std::atomic<uint32_t> m_readerDataGeneration{0};

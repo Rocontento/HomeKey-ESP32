@@ -44,7 +44,19 @@ std::unique_ptr<ddk::Session> NfcManager::buildAuthSession() {
         if (!m_reader || send.size() > 255) {
           return false;
         }
-        return m_reader->exchangeApdu(send, recv, 1000);
+        const bool ok = m_reader->exchangeApdu(send, recv, 1000);
+        // Diagnostic: a reply that is only a status word (no payload) is
+        // otherwise logged upstream as "<empty>", hiding whether the phone
+        // answered e.g. 6985 (not armed) or the reader reported an RF error.
+        if (ok && recv.size() <= 2) {
+          ESP_LOGW(TAG, "APDU %02X%02X answered with status-only reply: %s",
+                   send.size() > 0 ? send[0] : 0, send.size() > 1 ? send[1] : 0,
+                   recv.empty() ? "(none)" : fmt::format("{:02X}", fmt::join(recv, "")).c_str());
+        } else if (!ok) {
+          ESP_LOGW(TAG, "APDU %02X%02X exchange failed at reader level",
+                   send.size() > 0 ? send[0] : 0, send.size() > 1 ? send[1] : 0);
+        }
+        return ok;
       };
   ddk::SessionConfig config;
   config.target_flow = authFlow;
@@ -258,7 +270,10 @@ void NfcManager::pollingTask() {
     	}
     }
 
-    const uint16_t passiveTargetTimeoutMs = 500;
+    // Host-side cap on how long we wait for InListPassiveTarget to come back.
+    // Passive activation retries are 0, so the PN532 makes a single attempt
+    // and returns almost immediately; this only bounds a wedged reader.
+    const uint16_t passiveTargetTimeoutMs = 150;
     const TickType_t pollDelayTicks =
         pdMS_TO_TICKS(m_nfcFastPollingEnabled ? 5 : 100);
 
@@ -314,13 +329,34 @@ void NfcManager::pollingTask() {
 					continue;
         }
 
+        // Post-transaction cooldown: after a HomeKey transaction the phone is
+        // often still resting on the reader. Re-activating it immediately
+        // starts a second transaction the phone will not complete (it must
+        // leave and re-enter the field), which ends in a "flow failed" and an
+        // error shown on the phone even though the door already opened.
+        if (m_txnCooldownTicks != 0 &&
+            (xTaskGetTickCount() - m_lastTxnTick) < m_txnCooldownTicks) {
+            vTaskDelay(pollDelayTicks);
+            continue;
+        }
+        m_txnCooldownTicks = 0;
+
         std::vector<uint8_t> uid;
         std::array<uint8_t,2> atqa;
         uint8_t sak;
         if (m_reader->pollForTag(uid, atqa, sak, passiveTargetTimeoutMs)) {
             ESP_LOGI(TAG, "NFC tag detected!");
+            m_lastTxnOutcome = TxnOutcome::None;
             handleTagPresence(uid, atqa, sak);
             waitForTagRemoval();
+            if (m_lastTxnOutcome != TxnOutcome::None) {
+                m_lastTxnTick = xTaskGetTickCount();
+                m_txnCooldownTicks = pdMS_TO_TICKS(
+                    m_lastTxnOutcome == TxnOutcome::Success ? kPostSuccessCooldownMs
+                                                            : kPostFailureCooldownMs);
+                ESP_LOGD(TAG, "Post-transaction cooldown: %u ms",
+                         (unsigned)(m_txnCooldownTicks * portTICK_PERIOD_MS));
+            }
         }
 
         vTaskDelay(pollDelayTicks);
@@ -443,6 +479,7 @@ void NfcManager::handleHomeKeyAuth(const std::vector<uint8_t>& select_response) 
         }
 
         auto outcome = profile.finalize(session);
+        m_lastTxnOutcome = outcome ? TxnOutcome::Success : TxnOutcome::Failure;
         if (outcome) {
             ESP_LOGI(TAG, "Endpoint authenticated in %lli ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - startTime).count());
             publishAuthResult(outcome, m_readerDataManager.reader_identity().sub_identifier);
