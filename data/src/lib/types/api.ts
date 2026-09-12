@@ -93,6 +93,12 @@ export interface CaptivePortalConfig {
   nfcPinsPreset: number;
   /** NFC GPIO pin configuration [SS, SCK, MISO, MOSI] */
   nfcGpioPins: [number, number, number, number];
+  /** NFC reader type (0 = PN532, 1 = PN7160, 2 = ST25R3916) */
+  nfcReaderType: number;
+  /** PN7160 IRQ pin */
+  nfcIrqPin: number;
+  /** PN7160 VEN pin */
+  nfcVenPin: number;
   /** Enable Ethernet connectivity */
   ethernetEnabled: boolean;
   /** Active Ethernet preset index */
@@ -105,6 +111,12 @@ export interface CaptivePortalConfig {
   ethRmiiConfig: [number, number, number, number, number];
   /** SPI configuration [freq_mhz, pin_cs, pin_irq, pin_rst, pin_sck, pin_miso, pin_mosi] */
   ethSpiConfig: [number, number, number, number, number, number, number];
+  /** Override Strapping GPIO Pin restriction */
+  overrideStrappingRestriction: boolean;
+  /** Poll the NFC Module more aggressively for faster tag detection */
+  nfcFastPollingEnabled: boolean;
+  /** Access Point new password */
+  accessPointPassword?: string;
 }
 
 export interface WiFiNetwork {
@@ -133,7 +145,7 @@ export interface MiscConfig {
   lockAlwaysLock: boolean;
   /** Enable HomeKey auth precompute cache (faster taps, higher CPU/RAM) */
   hkAuthPrecomputeEnabled: boolean;
-  /** Poll the PN532 more aggressively for faster tag detection */
+  /** Poll the NFC Module more aggressively for faster tag detection */
   nfcFastPollingEnabled: boolean;
   /** GPIO pin for lock control */
   controlPin: number;
@@ -151,6 +163,12 @@ export interface MiscConfig {
   nfcPinsPreset: number;
   /** NFC GPIO pin configuration [pin1, pin2, pin3, pin4] */
   nfcGpioPins: [number, number, number, number];
+  /** NFC reader type (0 = PN532, 1 = PN7160, 2 = ST25R3916) */
+  nfcReaderType: number;
+  /** PN7160 IRQ pin */
+  nfcIrqPin: number;
+  /** PN7160 VEN pin */
+  nfcVenPin: number;
   /** Battery low status threshold percentage */
   btrLowStatusThreshold: number;
   /** Enable proximity battery monitoring */
@@ -167,6 +185,8 @@ export interface MiscConfig {
   ethRmiiConfig: [number, number, number, number, number];
   /** SPI configuration [freq_mhz, pin_cs, pin_irq, pin_rst, pin_sck, pin_miso, pin_mosi] */
   ethSpiConfig: [number, number, number, number, number, number, number];
+  /** Override Strapping GPIO Pin restriction */
+  overrideStrappingRestriction: boolean;
 }
 
 /**
@@ -302,7 +322,10 @@ export interface EthConfig {
 export interface NfcGpioPinsPreset {
   presets: {
     name: string;
+    type: number;
     gpioPins: number[];
+    irqPin: number;
+    venPin: number;
   }[];
 }
 
@@ -431,6 +454,15 @@ export enum CertificateType {
     HTTPS_CA_CERT,
     MAX
   };
+
+export const CertTypeString : { [key in CertificateType]?: string } = {
+  [CertificateType.MQTT_CA] : "MQTT_CA",
+  [CertificateType.MQTT_CLIENT]: "MQTT_CLIENT",
+  [CertificateType.MQTT_PRIVATE_KEY]: "MQTT_PRIVATE_KEY",
+  [CertificateType.HTTPS_SERVER_CERT]: "HTTPS_SERVER_CERT",
+  [CertificateType.HTTPS_PRIVATE_KEY]: "HTTPS_PRIVATE_KEY",
+  [CertificateType.HTTPS_CA_CERT]: "HTTPS_CA_CERT"
+}
 
 // Log Viewer Types
 

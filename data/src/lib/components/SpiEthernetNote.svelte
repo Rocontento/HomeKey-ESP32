@@ -15,7 +15,7 @@
       ? "first (SPI2) bus."
       : "second (SPI3) bus."}
     <br />
-    Ensure that the PN532 pins {selectedBus === 1
+    Ensure the NFC pins {selectedBus === 1
       ? "(except CS/SS) match"
       : "do not conflict with"}
     the Ethernet pins as they will {selectedBus === 1

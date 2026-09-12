@@ -27,7 +27,7 @@ export default {
 
       if (!configRes.success) throw new Error(configRes.error);
 
-      const data = configRes.data;
+      const data : CaptivePortalConfig = configRes.data;
 
       meta.captivePortalData = {
         config: {
@@ -37,12 +37,17 @@ export default {
           hk_key_color: data.hk_key_color ?? 0,
           nfcPinsPreset: data.nfcPinsPreset ?? 0,
           nfcGpioPins: data.nfcGpioPins ?? [5, 18, 19, 23],
+          nfcReaderType: data.nfcReaderType ?? 0,
+          nfcIrqPin: data.nfcIrqPin ?? 255,
+          nfcVenPin: data.nfcVenPin ?? 255,
           ethernetEnabled: data.ethernetEnabled ?? false,
           ethActivePreset: data.ethActivePreset ?? 255,
           ethPhyType: data.ethPhyType ?? 0,
           ethSpiBus: data.ethSpiBus ?? 1,
           ethRmiiConfig: data.ethRmiiConfig ?? [0, -1, -1, -1, 0],
           ethSpiConfig: data.ethSpiConfig ?? [20, -1, -1, -1, -1, -1, -1],
+          overrideStrappingRestriction: data.overrideStrappingRestriction ?? false,
+          nfcFastPollingEnabled: data.nfcFastPollingEnabled ?? false
         },
         nfcPresets: nfcRes.success ? nfcRes.data : null,
         ethConfig: ethRes.success ? ethRes.data : null,
@@ -58,12 +63,17 @@ export default {
           hk_key_color: 0,
           nfcPinsPreset: 0,
           nfcGpioPins: [5, 18, 19, 23],
+          nfcReaderType: 0,
+          nfcIrqPin: 255,
+          nfcVenPin: 255,
           ethernetEnabled: false,
           ethActivePreset: 255,
           ethPhyType: 0,
           ethSpiBus: 1,
           ethRmiiConfig: [0, -1, -1, -1, 0],
           ethSpiConfig: [20, -1, -1, -1, -1, -1, -1],
+          overrideStrappingRestriction: false,
+          nfcFastPollingEnabled: false
         },
         nfcPresets: null,
         ethConfig: null,

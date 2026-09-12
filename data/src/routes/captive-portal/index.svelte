@@ -2,7 +2,8 @@
 	import { route } from 'sv-router/generated';
 	import { saveCaptivePortalConfig, rebootDevice, scanWiFi } from '$lib/services/api';
 	import type { CaptivePortalConfig, WiFiNetwork, EthConfig, NfcGpioPinsPreset } from '$lib/types/api';
-    import HardwareConfig from '$lib/components/HardwareConfig.svelte';
+	import HardwareConfig from '$lib/components/HardwareConfig.svelte';
+    import { diff } from '$lib/utils/objDiff';
 
 	const colorOptions = [
 		{ value: 0, label: 'Tan', class: 'bg-[#ddd5cc] text-[#3E2723]' },
@@ -11,42 +12,40 @@
 		{ value: 3, label: 'Black', class: 'bg-[#2a2a2a] text-white' },
 	];
 
-	let config = $state<CaptivePortalConfig>({
+	let config_initial = $state<CaptivePortalConfig>(route.meta.captivePortalData?.config ?? {
 		wifiSsid: '',
 		wifiPassword: '',
 		setupCode: '46637726',
 		hk_key_color: 0,
 		nfcPinsPreset: 0,
 		nfcGpioPins: [5, 18, 19, 23],
+		nfcReaderType: 0,
+		nfcIrqPin: -1,
+		nfcVenPin: -1,
 		ethernetEnabled: false,
 		ethActivePreset: 255,
 		ethPhyType: 0,
 		ethSpiBus: 1,
 		ethRmiiConfig: [0, -1, -1, -1, 0],
 		ethSpiConfig: [20, -1, -1, -1, -1, -1, -1],
+    overrideStrappingRestriction: false,
+    nfcFastPollingEnabled: false,
+    accessPointPassword: ""
 	});
+	// svelte-ignore state_referenced_locally
+	let config = $state<CaptivePortalConfig>($state.snapshot(config_initial));
 	let loading = $state(false);
 	let saved = $state(false);
-	let error = $state<string | null>(null);
+	let error = $state<string | null>(route.meta.captivePortalData?.error ?? null);
 	let networks = $state<WiFiNetwork[]>([]);
 	let scanning = $state(false);
 	let showNetworkList = $state(false);
 	let activeTab = $state<'wifi' | 'hardware' | 'network'>('wifi');
-  let acquiredIP = $state("");
+	let acquiredIP = $state("");
 
 	// Derived values for NFC/Ethernet presets
 	let nfcPresets : NfcGpioPinsPreset = $derived(route.meta.captivePortalData?.nfcPresets ?? { presets: [] });
 	let ethConfig : EthConfig = $derived(route.meta.captivePortalData?.ethConfig ?? { boardPresets: [], supportedChips: [], numSpiBuses: 1, ethEnabled: false });
-
-
-	$effect(() => {
-		if (route.meta.captivePortalData?.config) {
-			config = { ...route.meta.captivePortalData.config };
-		}
-		if (route.meta.captivePortalData?.error) {
-			error = route.meta.captivePortalData.error;
-		}
-	});
 
 	function validateSetupCode(code: string): boolean {
 		return /^\d{8}$/.test(code);
@@ -87,6 +86,8 @@
 			const presetData = nfcPresets.presets[preset];
 			if (presetData) {
 				config.nfcGpioPins = [presetData.gpioPins[0], presetData.gpioPins[1], presetData.gpioPins[2], presetData.gpioPins[3]];
+				config.nfcIrqPin = presetData.irqPin;
+				config.nfcVenPin = presetData.venPin;
 			}
 		}
 	}
@@ -123,6 +124,33 @@
 		}
 	}
 
+	// Watch ethActivePreset changes and apply preset config
+	$effect(() => {
+		const preset = config.ethActivePreset;
+		if (preset !== undefined) {
+			handleEthPresetChange(preset);
+		}
+	});
+
+	// Watch nfcPinsPreset changes and apply/restore pins
+	$effect(() => {
+		const preset = config.nfcPinsPreset;
+		if (preset !== undefined) {
+			handleNfcPresetChange(preset);
+		}
+	});
+
+	// Watch nfcReaderType and reset preset to custom (255)
+	// svelte-ignore state_referenced_locally
+	let prevNfcReaderType = $state(config?.nfcReaderType);
+	$effect(() => {
+		const current = config.nfcReaderType;
+		if (current !== prevNfcReaderType) {
+			prevNfcReaderType = current;
+			config.nfcPinsPreset = 255;
+		}
+	});
+
 	async function handleScan() {
 		scanning = true;
 		error = null;
@@ -158,9 +186,10 @@
 
 		loading = true;
 		try {
-			const result = await saveCaptivePortalConfig(config);
+
+			const result = await saveCaptivePortalConfig(diff(config_initial, config));
 			if (result.success) {
-        acquiredIP = result.data.ip_addr;
+				acquiredIP = result.data.ip_addr;
 				saved = true;
 				// Trigger reboot after short delay
 				setTimeout(async () => {
@@ -334,6 +363,21 @@
 						/>
 					</div>
 
+					<div class="form-control">
+						<label class="label" for="accessPointPassword">
+							<span class="label-text font-medium">AP New Password</span>
+						</label>
+						<input
+							type="password"
+							id="accessPointPassword"
+							bind:value={config.accessPointPassword}
+							placeholder="Enter new AP password (optional)"
+							class="input input-bordered w-full"
+							maxlength="64"
+							disabled={loading}
+						/>
+					</div>
+
 					<!-- HomeKit Setup Code -->
 					<div class="form-control">
 						<label class="label" for="setupCode">
@@ -380,29 +424,26 @@
 					<div class="space-y-4">
 						<div>
 							<h3 class="text-sm font-semibold">Hardware Configuration</h3>
-							<p class="text-xs text-base-content/60">Configure GPIO pins for PN532 NFC reader and optional Ethernet connectivity.</p>
+							<p class="text-xs text-base-content/60">Configure GPIO pins for NFC reader and optional Ethernet connectivity.</p>
 						</div>
 
 						<HardwareConfig
-							nfcGpioPins={config.nfcGpioPins}
-							nfcPinsPreset={config.nfcPinsPreset}
+							bind:nfcGpioPins={config.nfcGpioPins}
+							bind:nfcPinsPreset={config.nfcPinsPreset}
 							nfcPresets={nfcPresets}
-							ethernetEnabled={config.ethernetEnabled}
-							ethActivePreset={config.ethActivePreset}
-							ethPhyType={config.ethPhyType}
-							ethSpiBus={config.ethSpiBus}
-							ethRmiiConfig={config.ethRmiiConfig}
-							ethSpiConfig={config.ethSpiConfig}
+							bind:nfcReaderType={config.nfcReaderType}
+							bind:nfcIrqPin={config.nfcIrqPin}
+							bind:nfcVenPin={config.nfcVenPin}
+							bind:ethernetEnabled={config.ethernetEnabled}
+							bind:ethActivePreset={config.ethActivePreset}
+							bind:ethPhyType={config.ethPhyType}
+							bind:ethSpiBus={config.ethSpiBus}
+							bind:ethRmiiConfig={config.ethRmiiConfig}
+							bind:ethSpiConfig={config.ethSpiConfig}
 							ethConfig={ethConfig}
 							loading={loading}
-							onNfcPresetChange={handleNfcPresetChange}
-							onEthPresetChange={handleEthPresetChange}
-							onNfcPinsChange={(pins) => config.nfcGpioPins = pins}
-							onEthernetToggle={(enabled) => config.ethernetEnabled = enabled}
-							onEthPhyTypeChange={(phyType) => config.ethPhyType = phyType}
-							onEthSpiBusChange={(bus) => config.ethSpiBus = bus}
-							onEthRmiiConfigChange={(cfg) => config.ethRmiiConfig = cfg}
-							onEthSpiConfigChange={(cfg) => config.ethSpiConfig = cfg}
+              bind:nfcFastPollingEnabled={config.nfcFastPollingEnabled}
+              bind:overrideStrappingRestriction={config.overrideStrappingRestriction}
 						/>
 					</div>
 				{/if}

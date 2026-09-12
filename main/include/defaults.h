@@ -19,7 +19,7 @@
 #define MQTT_NO_TAG_PUBLISH false // Disable publishing of tags to MQTT topic
 
 //MQTT SSL/TLS Settings
-#define MQTT_USE_SSL true // Enable/disable SSL/TLS for MQTT connection
+#define MQTT_USE_SSL false // Enable/disable SSL/TLS for MQTT connection
 #define MQTT_CA_CERT "" // CA certificate for server validation (PEM format)
 #define MQTT_CLIENT_CERT "" // Client certificate for mutual authentication (PEM format)
 #define MQTT_CLIENT_KEY "" // Client private key for mutual authentication (PEM format)
@@ -50,16 +50,25 @@
 // Miscellaneous
 #define HOMEKEY_COLOR TAN
 #define SETUP_CODE "46637726"  // HomeKit Setup Code (only for reference, has to be changed during WiFi Configuration or from WebUI)
-#define AP_PASSWORD ""  // AP password: empty = generate random on first boot
+#define OTA_PWD "homespan-ota" //custom password for ota
 #define DEVICE_NAME "HK" //Device name
 #define HOMEKEY_ALWAYS_UNLOCK 0 // Flag indicating if a successful Homekey authentication should always set and publish the unlock state
 #define HOMEKEY_ALWAYS_LOCK 0  // Flag indicating if a successful Homekey authentication should always set and publish the lock state
+#ifdef CONFIG_IDF_TARGET_ESP32
 #define HK_AUTH_PRECOMPUTE_ENABLED true // Enable HomeKey auth precompute cache (faster taps, higher CPU/RAM)
+#else 
+#define HK_AUTH_PRECOMPUTE_ENABLED false // Enable HomeKey auth precompute cache (faster taps, higher CPU/RAM)
+#endif
 #define NFC_FAST_POLLING_ENABLED false // Poll the PN532 more aggressively for faster tag detection
+#define NFC_READER_TYPE 0 // 0 = PN532, 1 = PN7160
+#define NFC_IRQ_PIN 255 // PN7160 IRQ pin (255 = unset)
+#define NFC_VEN_PIN 255 // PN7160 VEN pin (255 = unset)
 #define HS_STATUS_LED 255 // HomeSpan Status LED GPIO pin
 #define HS_PIN 255 // GPIO Pin for a Configuration Mode button (more info on https://github.com/HomeSpan/HomeSpan/blob/master/docs/UserGuide.md#device-configuration-mode)
 #define BTR_PROX_BAT_ENABLED false // Enable or disable battery monitoring
 #define BTR_PROX_BAT_LOW_THRESHOLD 10 // Battery low status threshold percentage
+
+#define AP_PASSWORD "HomeKey$123$"
 
 // Ethernet Settings
 #define ETH_ENABLED false // Enable or disable Ethernet connectivity
@@ -121,6 +130,7 @@
 #define HK_DUMB_SWITCH_MODE true // Bypass lock state external validation
 
 // WebUI
-#define WEB_AUTH_ENABLED true
+#define WEB_AUTH_ENABLED false
 #define WEB_AUTH_USERNAME "admin"
 #define WEB_AUTH_PASSWORD "password"
+#define NFC_ACTIVE_PRESET 255 // NFC preset index (255 for custom pins)

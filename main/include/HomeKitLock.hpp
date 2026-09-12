@@ -16,12 +16,12 @@ namespace Service
 
 class LockManager;
 class ConfigManager;
-class ReaderDataManager;
+class NvsCredentialStore;
 namespace espConfig { struct misc_config_t; };
 
 class HomeKitLock {
 public:
-    HomeKitLock(std::function<void(int)> &conn_cb, LockManager& lockManager, ConfigManager& configManager, ReaderDataManager& readerDataManager);
+    HomeKitLock(std::function<void(int)> &conn_cb, LockManager& lockManager, ConfigManager& configManager, NvsCredentialStore& readerDataManager);
     /**
  * @brief Unsubscribes HomeKitLock from its EventBus topics.
  *
@@ -40,7 +40,7 @@ private:
 
     LockManager& m_lockManager;
     ConfigManager& m_configManager;
-    ReaderDataManager& m_readerDataManager;
+    NvsCredentialStore& m_readerDataManager;
 
     std::function<void(int)> &conn_cb;
 
@@ -72,9 +72,9 @@ private:
       boolean update() override;
     };
     struct NFCAccessService : Service::NFCAccess {
-        ReaderDataManager& m_readerDataManager;
+        NvsCredentialStore& m_readerDataManager;
         SpanCharacteristic* m_nfcControlPoint;
-        NFCAccessService(ReaderDataManager& readerDataManager);
+        NFCAccessService(NvsCredentialStore& readerDataManager);
         boolean update() override;
     };
     struct PhysicalLockBatteryService : Service::BatteryService {

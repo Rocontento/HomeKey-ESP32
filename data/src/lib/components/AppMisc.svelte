@@ -15,8 +15,23 @@
 	import { diff } from "$lib/utils/objDiff";
 	import HardwareConfig from "$lib/components/HardwareConfig.svelte";
 	import CertManager from "$lib/components/CertManager.svelte";
+	import PairingQR from "$lib/components/PairingQR.svelte";
 
-	let { misc, eth, nfcPresets, nfcConnected = $bindable(false), error } = $props();
+	interface Props {
+		misc: MiscConfig;
+		eth: EthConfig;
+		nfcPresets: NfcGpioPinsPreset;
+		nfcConnected?: boolean;
+		error?: string | null;
+	}
+
+	let { 
+		misc = $bindable(), 
+		eth, 
+		nfcPresets, 
+		nfcConnected = $bindable(false), 
+		error = $bindable() 
+	}: Props = $props();
 
 	let activeTab = $state<'homekit' | 'hardware' | 'network' | 'security'>('homekit');
 
@@ -34,84 +49,142 @@
 		{ value: 3, label: 'Black', class: 'bg-[#2a2a2a] text-white' },
 	];
 
-	const saveMiscConfig = async (e: any) => {
-		e.preventDefault();
-		try {
-			if (!miscConfig || !misc) return;
-			const result = await saveConfig("misc", diff(misc, miscConfig));
-			if (result.success) {
-				miscConfig = result.data;
-				misc = result.data;
-			}
-		} catch (e) {
-			const message = e instanceof Error ? e.message : String(e);
-			error = message;
-			alert(`Error saving config: ${message}`);
-		}
-	};
+  const saveMiscConfig = async (e: any) => {
+      e.preventDefault();
+      try {
+          if (!miscConfig || !misc) return;
+          
+          // Take snapshots of both objects to strip Svelte proxies and break reference links
+          const baseline = $state.snapshot(misc);
+          const current = $state.snapshot(miscConfig);
 
-	const handleNfcPresetChange = (preset: number) => {
-		miscConfig.nfcPinsPreset = preset;
-		if (preset !== 255 && nfcPresets) {
-			const presetData = nfcPresets.presets[preset];
-			if (presetData) {
-				miscConfig.nfcGpioPins = [
-					presetData.gpioPins[0],
-					presetData.gpioPins[1],
-					presetData.gpioPins[2],
-					presetData.gpioPins[3],
-				];
-			}
-		} else if (preset === 255 && misc) {
-			miscConfig.nfcGpioPins = misc.nfcGpioPins;
-		}
-	};
+          const result = await saveConfig("misc", diff(baseline, current));
+          if (result.success) {
+              // Update both states with decoupled snapshots from the server response
+              misc = result.data;
+              miscConfig = $state.snapshot(result.data);
+          }
+      } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          error = message;
+          alert(`Error saving config: {message}`);
+      }
+  };
 
-	const handleEthPresetChange = (preset: number) => {
-		miscConfig.ethActivePreset = preset;
-		if (preset !== 255 && ethConfig!.boardPresets) {
-			const presetData = ethConfig!.boardPresets[preset];
-			if (presetData) {
-				miscConfig.ethPhyType = presetData.ethChip.phy_type;
-				if (presetData.spi_conf) {
-					miscConfig.ethSpiConfig = [
-						presetData.spi_conf.spi_freq_mhz,
-						presetData.spi_conf.pin_cs,
-						presetData.spi_conf.pin_irq,
-						presetData.spi_conf.pin_rst,
-						presetData.spi_conf.pin_sck,
-						presetData.spi_conf.pin_miso,
-						presetData.spi_conf.pin_mosi,
-					];
-					miscConfig.ethRmiiConfig = misc?.ethRmiiConfig || [
-						0, -1, -1, -1, 0,
-					];
-				}
-				if (presetData.rmii_conf) {
-					miscConfig.ethRmiiConfig = [
-						presetData.rmii_conf.phy_addr,
-						presetData.rmii_conf.pin_mcd,
-						presetData.rmii_conf.pin_mdio,
-						presetData.rmii_conf.pin_power,
-						presetData.rmii_conf.pin_rmii_clock,
-					];
-					miscConfig.ethSpiConfig = misc?.ethSpiConfig || [
-						20, -1, -1, -1, -1, -1, -1,
-					];
-				}
-			}
-		}
-	};
+  const handleNfcPresetChange = (preset: number) => {
+    miscConfig.nfcPinsPreset = preset;
+    if (preset !== 255 && nfcPresets) {
+      const presetData = nfcPresets.presets[preset];
+      if (presetData) {
+        miscConfig.nfcGpioPins = [
+          presetData.gpioPins[0],
+          presetData.gpioPins[1],
+          presetData.gpioPins[2],
+          presetData.gpioPins[3],
+        ];
+        miscConfig.nfcIrqPin = presetData.irqPin;
+        miscConfig.nfcVenPin = presetData.venPin;
+      }
+    } else if (preset === 255 && misc) {
+      // Clone element-by-element to preserve the 4-element tuple structure
+      miscConfig.nfcGpioPins = [
+        misc.nfcGpioPins[0],
+        misc.nfcGpioPins[1],
+        misc.nfcGpioPins[2],
+        misc.nfcGpioPins[3]
+      ];
+      miscConfig.nfcIrqPin = misc.nfcIrqPin;
+      miscConfig.nfcVenPin = misc.nfcVenPin;
+    }
+  };
 
-	const resetForm = () => {
-		if (misc) {
-			miscConfig = misc;
-		}
-	};
+  const handleEthPresetChange = (preset: number) => {
+    miscConfig.ethActivePreset = preset;
+    if (preset !== 255 && ethConfig!.boardPresets) {
+      const presetData = ethConfig!.boardPresets[preset];
+      if (presetData) {
+        miscConfig.ethPhyType = presetData.ethChip.phy_type;
+        if (presetData.spi_conf) {
+          miscConfig.ethSpiConfig = [
+            presetData.spi_conf.spi_freq_mhz,
+            presetData.spi_conf.pin_cs,
+            presetData.spi_conf.pin_irq,
+            presetData.spi_conf.pin_rst,
+            presetData.spi_conf.pin_sck,
+            presetData.spi_conf.pin_miso,
+            presetData.spi_conf.pin_mosi,
+          ];
+          miscConfig.ethRmiiConfig = misc?.ethRmiiConfig 
+            ? [
+              misc.ethRmiiConfig[0],
+              misc.ethRmiiConfig[1],
+              misc.ethRmiiConfig[2],
+              misc.ethRmiiConfig[3],
+              misc.ethRmiiConfig[4]
+              ]
+            : [0, -1, -1, -1, 0];
+        }
+        if (presetData.rmii_conf) {
+          miscConfig.ethRmiiConfig = [
+            presetData.rmii_conf.phy_addr,
+            presetData.rmii_conf.pin_mcd,
+            presetData.rmii_conf.pin_mdio,
+            presetData.rmii_conf.pin_power,
+            presetData.rmii_conf.pin_rmii_clock,
+          ];
+          miscConfig.ethSpiConfig = misc?.ethSpiConfig 
+            ? [
+              misc.ethSpiConfig[0],
+              misc.ethSpiConfig[1],
+              misc.ethSpiConfig[2],
+              misc.ethSpiConfig[3],
+              misc.ethSpiConfig[4],
+              misc.ethSpiConfig[5],
+              misc.ethSpiConfig[6]
+              ]
+            : [20, -1, -1, -1, -1, -1, -1];
+        }
+      }
+    }
+  };
+  const resetForm = () => {
+      if (misc) {
+          // Use snapshot to avoid sharing references
+          miscConfig = $state.snapshot(misc);
+      }
+  };
 
+	// Watch ethActivePreset from the original config and apply preset on load
 	$effect(() => {
 		if (misc?.ethActivePreset !== 255 && misc) {
 			handleEthPresetChange(misc.ethActivePreset);
+		}
+	});
+
+	// Watch user-driven ethActivePreset changes and apply preset
+	$effect(() => {
+		const preset = miscConfig?.ethActivePreset;
+		if (preset !== undefined) {
+			handleEthPresetChange(preset);
+		}
+	});
+
+	// Watch nfcPinsPreset and apply/restore pins
+	$effect(() => {
+		const preset = miscConfig?.nfcPinsPreset;
+		if (preset !== undefined) {
+			handleNfcPresetChange(preset);
+		}
+	});
+
+	// Watch nfcReaderType and reset preset to custom (255)
+	// svelte-ignore state_referenced_locally
+	let prevNfcReaderType = $state(miscConfig?.nfcReaderType);
+	$effect(() => {
+		const current = miscConfig?.nfcReaderType;
+		if (current !== prevNfcReaderType) {
+			prevNfcReaderType = current;
+			miscConfig.nfcPinsPreset = 255;
 		}
 	});
 </script>
@@ -262,6 +335,7 @@
 
 							<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 								<div class="form-control">
+									<!-- svelte-ignore a11y_label_has_associated_control -->
 									<label class="label">
 										<span class="label-text text-xs">Device Name</span>
 									</label>
@@ -274,6 +348,7 @@
 									/>
 								</div>
 								<div class="form-control">
+									<!-- svelte-ignore a11y_label_has_associated_control -->
 									<label class="label">
 										<span class="label-text text-xs">Setup Code</span>
 									</label>
@@ -287,6 +362,11 @@
 										inputmode="numeric"
 									/>
 								</div>
+							</div>
+
+							<!-- Live pairing QR, derived from the setup code above. -->
+							<div class="mt-2">
+								<PairingQR setupCode={miscConfig.setupCode} />
 							</div>
 
 							<!-- Toggles -->
@@ -361,36 +441,33 @@
 						<div class="space-y-4">
 							<div>
 								<h3 class="text-sm font-semibold">Hardware Configuration</h3>
-								<p class="text-xs text-base-content/60">Configure GPIO pins for PN532 NFC reader and optional Ethernet connectivity.</p>
+								<p class="text-xs text-base-content/60">Configure GPIO pins for NFC reader and optional Ethernet connectivity.</p>
 							</div>
 
 							<HardwareConfig
-								nfcGpioPins={miscConfig.nfcGpioPins}
-								nfcPinsPreset={miscConfig.nfcPinsPreset}
+								bind:nfcGpioPins={miscConfig.nfcGpioPins}
+								bind:nfcPinsPreset={miscConfig.nfcPinsPreset}
 								nfcPresets={nfcPresetsList}
-								ethernetEnabled={miscConfig.ethernetEnabled}
-								ethActivePreset={miscConfig.ethActivePreset}
-								ethPhyType={miscConfig.ethPhyType}
-								ethSpiBus={miscConfig.ethSpiBus}
-								ethRmiiConfig={miscConfig.ethRmiiConfig}
-								ethSpiConfig={miscConfig.ethSpiConfig}
+								bind:nfcReaderType={miscConfig.nfcReaderType}
+								bind:nfcIrqPin={miscConfig.nfcIrqPin}
+								bind:nfcVenPin={miscConfig.nfcVenPin}
+								bind:ethernetEnabled={miscConfig.ethernetEnabled}
+								bind:ethActivePreset={miscConfig.ethActivePreset}
+								bind:ethPhyType={miscConfig.ethPhyType}
+								bind:ethSpiBus={miscConfig.ethSpiBus}
+								bind:ethRmiiConfig={miscConfig.ethRmiiConfig}
+								bind:ethSpiConfig={miscConfig.ethSpiConfig}
 								ethConfig={ethConfig}
 								nfcConnected={nfcConnected}
-                nfcFastPollingEnabled={miscConfig.nfcFastPollingEnabled}
-								onNfcPresetChange={handleNfcPresetChange}
-								onEthPresetChange={handleEthPresetChange}
-								onNfcPinsChange={(pins) => miscConfig.nfcGpioPins = pins}
-								onEthernetToggle={(enabled) => miscConfig.ethernetEnabled = enabled}
-								onEthPhyTypeChange={(phyType) => miscConfig.ethPhyType = phyType}
-								onEthSpiBusChange={(bus) => miscConfig.ethSpiBus = bus}
-								onEthRmiiConfigChange={(cfg) => miscConfig.ethRmiiConfig = cfg}
-								onEthSpiConfigChange={(cfg) => miscConfig.ethSpiConfig = cfg}
+								bind:nfcFastPollingEnabled={miscConfig.nfcFastPollingEnabled}
+                bind:overrideStrappingRestriction={miscConfig.overrideStrappingRestriction}
 							/>
 
 							<!-- HomeSpan -->
 							<div class="py-2 px-3 bg-base-100 rounded-lg">
 								<p class="text-sm font-medium mb-2">HomeSpan - <a class="text-xs text-base-content/60 underline mb-2" href="https://github.com/HomeSpan/HomeSpan/blob/master/docs/UserGuide.md#device-configuration-mode">User Guide</a></p>
 								<div class="form-control mb-2">
+									<!-- svelte-ignore a11y_label_has_associated_control -->
 									<label class="label">
 										<span class="label-text text-xs">OTA Password</span>
 									</label>
@@ -402,6 +479,7 @@
 								</div>
 								<div class="grid grid-cols-2 gap-2">
 									<div class="form-control">
+										<!-- svelte-ignore a11y_label_has_associated_control -->
 										<label class="label">
 											<span class="label-text text-xs">Control GPIO Pin</span>
 										</label>
@@ -412,6 +490,7 @@
 										/>
 									</div>
 									<div class="form-control">
+										<!-- svelte-ignore a11y_label_has_associated_control -->
 										<label class="label">
 											<span class="label-text text-xs">Status LED GPIO Pin</span>
 										</label>
@@ -450,6 +529,7 @@
 								{#if miscConfig.webAuthEnabled}
 									<div class="grid grid-cols-2 gap-4">
 										<div class="form-control">
+											<!-- svelte-ignore a11y_label_has_associated_control -->
 											<label class="label">
 												<span class="label-text text-xs">Username</span>
 											</label>
@@ -461,6 +541,7 @@
 											/>
 										</div>
 										<div class="form-control">
+											<!-- svelte-ignore a11y_label_has_associated_control -->
 											<label class="label">
 												<span class="label-text text-xs">Password</span>
 											</label>
@@ -497,7 +578,7 @@
 								{#if miscConfig.webHttpsEnabled}
 									<div class="flex items-center justify-between py-2 px-3 bg-warning/10 rounded-lg">
 										<div class="flex items-start gap-2">
-											<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+											<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 												<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
 											</svg>
 											<div>

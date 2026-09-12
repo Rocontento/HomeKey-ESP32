@@ -1,16 +1,19 @@
 #pragma once
 #include "cJSON.h"
 #include "esp_http_server.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_timer.h"
-#include "app_event_loop.hpp"
+#include <cstdint>
 #include <deque>
 #include <memory>
+#include <atomic>
 #include <string>
 #include <vector>
 
 // Forward declarations
 class ConfigManager;
-class ReaderDataManager;
+class NvsCredentialStore;
 class SystemManager;
 class MqttManager;
 class NfcManager;
@@ -51,7 +54,7 @@ public:
   // Public Interface
   // ------------------------------------------------------------------------
   WebServerManager(ConfigManager &configManager,
-                   ReaderDataManager &readerDataManager);
+                   NvsCredentialStore &readerDataManager);
   ~WebServerManager();
 
   void begin();
@@ -67,6 +70,7 @@ public:
   void setMqttManager(MqttManager *mqttManager) { m_mqttManager = mqttManager; }
   void setNfcManager(NfcManager *nfcManager) { m_nfcManager = nfcManager; }
   void broadcastWs(const uint8_t *payload, size_t len, httpd_ws_type_t type);
+  void setWSBackLogSize(const uint16_t size);
 
 private:
   // ------------------------------------------------------------------------
@@ -79,10 +83,34 @@ private:
     WsClient(int file_descriptor) : fd(file_descriptor) {}
   };
 
+  enum class OTAUploadType { FIRMWARE, LITTLEFS };
+
+  struct OTAState {
+    esp_ota_handle_t handle = 0;
+    const esp_partition_t *updatePartition = nullptr;
+    const esp_partition_t *littlefsPartition = nullptr;
+    size_t writtenBytes = 0;
+    size_t totalBytes = 0;
+    bool skipReboot = false;
+    bool inProgress = false;
+    std::string error;
+    OTAUploadType currentUploadType = OTAUploadType::FIRMWARE;
+  };
+
+  struct OTAParams {
+    httpd_req_t *req;
+    WebServerManager *instance;
+    OTAUploadType uploadType;
+    bool skipReboot;
+    size_t contentLength;
+    OTAState *state;
+  };
+
   // ------------------------------------------------------------------------
   // Static Task Callbacks
   // ------------------------------------------------------------------------
   static void ws_send_task(void *arg);
+  static void otaTask(void *pvParameters);
   static void statusTimerCallback(void *arg);
 
   // ------------------------------------------------------------------------
@@ -100,10 +128,12 @@ private:
   static esp_err_t handleRootOrHash(httpd_req_t *req);
   static esp_err_t handleStaticFiles(httpd_req_t *req);
   static esp_err_t handleWebSocket(httpd_req_t *req);
+  static esp_err_t handleOTAUpload(httpd_req_t *req);
   static esp_err_t handleCertificateUpload(httpd_req_t *req);
   static esp_err_t handleCertificateStatus(httpd_req_t *req);
   static esp_err_t handleCertificateDelete(httpd_req_t *req);
 
+  static void captivePortalSaveTask(void* pvParameters);
   static esp_err_t handleCaptivePortal(httpd_req_t *req);
   static esp_err_t handleGetCaptivePortalConfig(httpd_req_t *req);
   static esp_err_t handleSaveCaptivePortalConfig(httpd_req_t *req);
@@ -128,15 +158,21 @@ private:
   // Device info/status
   std::string getDeviceMetrics();
   std::string getDeviceInfo();
+  std::string getOTAInfo();
+  // OTA management
+  void broadcastOTAStatus(const OTAState& state);
 
   // Utility methods
   static bool validateRequest(httpd_req_t *req, cJSON *currentData,
-                              const char *body);
+                              cJSON *obj);
   static WebServerManager *getInstance(httpd_req_t *req);
-  static esp_err_t ws_send_frame(httpd_handle_t server, int fd,
-                                 const uint8_t *payload, size_t len,
-                                 httpd_ws_type_t type = HTTPD_WS_TYPE_TEXT);
   static esp_err_t sendAuthFailure(httpd_req_t *req);
+  static esp_err_t ws_post_handshake_cb(httpd_req_t *req);
+  static esp_err_t sendJsonError(httpd_req_t *req, const std::string &msg, 
+                            const char *status = "400 Bad Request");
+  static bool heapGuardOk(httpd_req_t *req, bool otherActive,
+                                    const char *thisName, const char *otherName);
+  bool shouldEnableHttps() const;
 
   // ------------------------------------------------------------------------
   // Member Variables
@@ -149,7 +185,7 @@ private:
 
   // Dependencies
   ConfigManager &m_configManager;
-  ReaderDataManager &m_readerDataManager;
+  NvsCredentialStore &m_readerDataManager;
   MqttManager *m_mqttManager;
   NfcManager *m_nfcManager;
 
@@ -160,7 +196,7 @@ private:
   std::mutex m_wsClientsMutex;
   esp_timer_handle_t m_statusTimer;
   std::deque<std::vector<uint8_t>> m_wsBroadcastBuffer;
-
-
+  std::atomic<uint16_t> wsBacklogSize{0};
+  std::atomic<bool> m_otaInProgress{false};
   bool m_isInitialized{false};
 };

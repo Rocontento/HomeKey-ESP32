@@ -13,6 +13,9 @@
 [submodule "components/loggable"]
 	path = components/loggable
 	url = https://github.com/rednblkx/loggable-thing.git
+[submodule "components/event_bus"]
+	path = components/event_bus
+	url = https://github.com/rednblkx/esp32-event-bus.git
 [submodule "components/loggable_espidf"]
 	path = components/loggable_espidf
 	url = https://github.com/rednblkx/loggable-espidf.git
@@ -22,3 +25,6 @@
 [submodule "components/pn532_hal"]
 	path = components/pn532_hal
 	url = https://github.com/rednblkx/esp-hal-pn532.git
+[submodule "components/pn7160"]
+	path = components/pn7160
+	url = https://github.com/rednblkx/pn7160.git

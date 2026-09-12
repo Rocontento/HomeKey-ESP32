@@ -1,121 +1,281 @@
 #include "ReaderDataManager.hpp"
+#include <algorithm>
+#include <esp_log.h>
 #include <map>
 #include <nvs_flash.h>
-#include <esp_log.h>
-#include <algorithm>
-#include <ranges>
+#include "app_event_loop.hpp"
+#include "eventStructs.hpp"
 #include "msgpack.h"
 
-const char* ReaderDataManager::TAG = "ReaderDataManager";
-const char* ReaderDataManager::NVS_KEY = "READERDATA";
+const char* NvsCredentialStore::TAG = "NvsCredStore";
+const char* NvsCredentialStore::NVS_KEY = "READERDATA";
 
-/**
- * @brief Constructs a ReaderDataManager and initializes internal state.
- *
- * Initializes the manager with no open NVS handle and marks it as not initialized.
- */
-ReaderDataManager::ReaderDataManager() : m_isInitialized(false) {
-}
+namespace {
 
-/**
- * @brief Releases resources held by the manager and closes the NVS handle if initialized.
- *
- * If the manager opened the NVS namespace during its lifetime, this destructor closes
- * the associated NVS handle to ensure proper cleanup of system resources.
- */
-ReaderDataManager::~ReaderDataManager() {
-    if (m_isInitialized) {
-        nvs_close(m_nvsHandle);
+const char* CODEC_TAG = "NvsCredStore";
+
+void pack_bytes(msgpack_packer* pk, const char* key, const std::vector<uint8_t>& value) {
+    const size_t key_len = strlen(key);
+    msgpack_pack_str(pk, key_len);
+    msgpack_pack_str_body(pk, key, key_len);
+    msgpack_pack_array(pk, value.size());
+    for (uint8_t o : value) {
+        msgpack_pack_unsigned_char(pk, o);
     }
 }
 
-/**
- * @brief Initialize NVS storage for reader data and load any existing data.
- *
- * Opens the "SAVED_DATA" NVS namespace, sets the logger level for this component,
- * marks the manager as initialized, and invokes load() to populate in-memory data.
- *
- * @return true if initialization succeeded and load was triggered, false if opening NVS failed.
- */
-bool ReaderDataManager::begin() {
-  esp_log_level_set(TAG, ESP_LOG_INFO);
-    if (m_isInitialized) {
+void unpack_bytes(const std::map<std::string, msgpack_object>& obj_map,
+                  const char* key, std::vector<uint8_t>& out) {
+    auto it = obj_map.find(key);
+    if (it == obj_map.end() || it->second.type != MSGPACK_OBJECT_ARRAY) {
+        return;
+    }
+    const msgpack_object_array& arr = it->second.via.array;
+    out.clear();
+    out.reserve(arr.size);
+    for (uint32_t i = 0; i < arr.size; ++i) {
+        out.push_back(static_cast<uint8_t>(arr.ptr[i].via.u64));
+    }
+}
+
+std::map<std::string, msgpack_object> to_map(msgpack_object obj) {
+    std::map<std::string, msgpack_object> obj_map;
+    if (obj.type != MSGPACK_OBJECT_MAP) {
+        return obj_map;
+    }
+    for (uint32_t i = 0; i < obj.via.map.size; ++i) {
+        msgpack_object_kv* kv = &obj.via.map.ptr[i];
+        if (kv->key.type == MSGPACK_OBJECT_STR) {
+            obj_map[std::string(kv->key.via.str.ptr, kv->key.via.str.size)] = kv->val;
+        }
+    }
+    return obj_map;
+}
+
+void pack_endpoint(msgpack_packer* pk, const ddk::Endpoint& endpoint) {
+    msgpack_pack_map(pk, 7);
+
+    pack_bytes(pk, "endpointId", endpoint.id);
+
+    msgpack_pack_str(pk, strlen("last_used_at"));
+    msgpack_pack_str_body(pk, "last_used_at", strlen("last_used_at"));
+    msgpack_pack_unsigned_int(pk, endpoint.used_at);
+
+    msgpack_pack_str(pk, strlen("counter"));
+    msgpack_pack_str_body(pk, "counter", strlen("counter"));
+    msgpack_pack_int(pk, endpoint.counter);
+
+    msgpack_pack_str(pk, strlen("key_type"));
+    msgpack_pack_str_body(pk, "key_type", strlen("key_type"));
+    msgpack_pack_int(pk, static_cast<int>(endpoint.key_type));
+
+    pack_bytes(pk, "publicKey", endpoint.public_key);
+    pack_bytes(pk, "endpoint_key_x", endpoint.public_key_x);
+    pack_bytes(pk, "persistent_key", endpoint.persistent_key);
+}
+
+void unpack_endpoint(msgpack_object obj, ddk::Endpoint& endpoint) {
+    if (obj.type != MSGPACK_OBJECT_MAP) {
+        ESP_LOGE(CODEC_TAG, "Expected map for endpoint deserialization.");
+        return;
+    }
+    auto obj_map = to_map(obj);
+
+    unpack_bytes(obj_map, "endpointId", endpoint.id);
+    if (obj_map.count("last_used_at") && obj_map["last_used_at"].type == MSGPACK_OBJECT_POSITIVE_INTEGER) {
+        endpoint.used_at = static_cast<uint32_t>(obj_map["last_used_at"].via.u64);
+    }
+    // Verbatim quirk preserved: POSITIVE_INTEGER type check + .via.i64 read.
+    if (obj_map.count("counter") && obj_map["counter"].type == MSGPACK_OBJECT_POSITIVE_INTEGER) {
+        endpoint.counter = static_cast<uint8_t>(obj_map["counter"].via.i64);
+    }
+    if (obj_map.count("key_type") && obj_map["key_type"].type == MSGPACK_OBJECT_POSITIVE_INTEGER) {
+        endpoint.key_type = static_cast<ddk::KeyType>(obj_map["key_type"].via.i64);
+    }
+    unpack_bytes(obj_map, "publicKey", endpoint.public_key);
+    unpack_bytes(obj_map, "endpoint_key_x", endpoint.public_key_x);
+    unpack_bytes(obj_map, "persistent_key", endpoint.persistent_key);
+}
+
+void pack_issuer(msgpack_packer* pk, const ddk::Issuer& issuer) {
+    msgpack_pack_map(pk, 4);
+
+    pack_bytes(pk, "issuerId", issuer.id);
+    pack_bytes(pk, "publicKey", issuer.public_key);
+    // Written for wire fidelity (rollback reads it); empty in practice today.
+    pack_bytes(pk, "issuer_key_x", issuer.public_key_x);
+
+    msgpack_pack_str(pk, strlen("endpoints"));
+    msgpack_pack_str_body(pk, "endpoints", strlen("endpoints"));
+    msgpack_pack_array(pk, issuer.endpoints.size());
+    for (const auto& endpoint : issuer.endpoints) {
+        pack_endpoint(pk, endpoint);
+    }
+}
+
+void unpack_issuer(msgpack_object obj, ddk::Issuer& issuer) {
+    if (obj.type != MSGPACK_OBJECT_MAP) {
+        ESP_LOGE(CODEC_TAG, "Expected map for issuer deserialization.");
+        return;
+    }
+    auto obj_map = to_map(obj);
+
+    unpack_bytes(obj_map, "issuerId", issuer.id);
+    unpack_bytes(obj_map, "publicKey", issuer.public_key);
+    unpack_bytes(obj_map, "issuer_key_x", issuer.public_key_x);
+    if (obj_map.count("endpoints") && obj_map["endpoints"].type == MSGPACK_OBJECT_ARRAY) {
+        msgpack_object_array endpoints_array = obj_map["endpoints"].via.array;
+        issuer.endpoints.resize(endpoints_array.size);
+        for (uint32_t i = 0; i < endpoints_array.size; ++i) {
+            unpack_endpoint(endpoints_array.ptr[i], issuer.endpoints[i]);
+        }
+    }
+}
+
+void pack_all(msgpack_packer* pk, const ddk::ReaderIdentity& identity,
+              const std::vector<ddk::Issuer>& issuers) {
+    msgpack_pack_map(pk, 6);
+
+    pack_bytes(pk, "reader_private_key", identity.private_key);
+    pack_bytes(pk, "reader_public_key", identity.public_key);
+    pack_bytes(pk, "reader_key_x", identity.public_key_x);
+    pack_bytes(pk, "group_identifier", identity.group_identifier);
+    pack_bytes(pk, "unique_identifier", identity.sub_identifier);
+
+    msgpack_pack_str(pk, strlen("issuers"));
+    msgpack_pack_str_body(pk, "issuers", strlen("issuers"));
+    msgpack_pack_array(pk, issuers.size());
+    for (const auto& issuer : issuers) {
+        pack_issuer(pk, issuer);
+    }
+}
+
+void unpack_all(msgpack_object obj, ddk::ReaderIdentity& identity,
+                std::vector<ddk::Issuer>& issuers) {
+    if (obj.type != MSGPACK_OBJECT_MAP) {
+        ESP_LOGE(CODEC_TAG, "Expected map for top-level deserialization.");
+        return;
+    }
+    auto obj_map = to_map(obj);
+
+    unpack_bytes(obj_map, "reader_private_key", identity.private_key);
+    unpack_bytes(obj_map, "reader_public_key", identity.public_key);
+    unpack_bytes(obj_map, "reader_key_x", identity.public_key_x);
+    unpack_bytes(obj_map, "group_identifier", identity.group_identifier);
+    unpack_bytes(obj_map, "unique_identifier", identity.sub_identifier);
+    if (obj_map.count("issuers") && obj_map["issuers"].type == MSGPACK_OBJECT_ARRAY) {
+        msgpack_object_array issuers_array = obj_map["issuers"].via.array;
+        issuers.resize(issuers_array.size);
+        for (uint32_t i = 0; i < issuers_array.size; ++i) {
+            unpack_issuer(issuers_array.ptr[i], issuers[i]);
+        }
+    }
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+NvsCredentialStore::NvsCredentialStore() = default;
+
+NvsCredentialStore::~NvsCredentialStore() {
+    if (initialized_) {
+        nvs_close(handle_);
+    }
+}
+
+bool NvsCredentialStore::begin() {
+    esp_log_level_set(TAG, ESP_LOG_INFO);
+    if (initialized_) {
         ESP_LOGW(TAG, "Already initialized.");
         return true;
     }
 
-    esp_err_t err = nvs_open("SAVED_DATA", NVS_READWRITE, &m_nvsHandle);
+    esp_err_t err = nvs_open("SAVED_DATA", NVS_READWRITE, &handle_);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
         return false;
     }
 
-    m_isInitialized = true;
+    initialized_ = true;
     load();
     return true;
 }
 
-/**
- * @brief Accesses the current in-memory reader data.
- *
- * @return const readerData_t& Reference to the stored reader data.
- */
-const readerData_t& ReaderDataManager::getReaderData() const {
-    return m_readerData;
+// ---------------------------------------------------------------------------
+// ddk::CredentialStore — non-locking accessors
+// ---------------------------------------------------------------------------
+
+const ddk::ReaderIdentity& NvsCredentialStore::reader_identity() const {
+    return identity_;
 }
 
-/**
- * @brief Returns a thread-safe snapshot copy of the current in-memory reader data.
- *
- * @return readerData_t Copy of the stored reader data.
- */
-readerData_t ReaderDataManager::getReaderDataCopy() const {
-    std::lock_guard<std::mutex> lock(m_readerDataMutex);
-    return m_readerData;
+void NvsCredentialStore::provision_identity(const ddk::ReaderIdentity& identity) {
+  if(identity_.group_identifier.empty() && identity_.sub_identifier.empty() && identity_.private_key.empty()){
+    identity_ = identity;
+  } else ESP_LOGE(TAG, "Reader Identity already provisioned");
 }
 
-/**
- * @brief Accesses the reader's group identifier.
- *
- * @return const std::vector<uint8_t>& Reference to the stored group identifier bytes.
- */
-const std::vector<uint8_t>& ReaderDataManager::getReaderGid() const {
-    return m_readerData.reader_gid;
+ddk::span<ddk::Issuer> NvsCredentialStore::issuers() {
+    return issuers_;
 }
 
-/**
- * @brief Provides access to the stored reader unique identifier.
- *
- * @return const std::vector<uint8_t>& Reference to the reader unique identifier as a byte vector.
- */
-const std::vector<uint8_t>& ReaderDataManager::getReaderId() const {
-    return m_readerData.reader_id;
+void NvsCredentialStore::save() {
+    if (!initialized_) {
+        ESP_LOGE(TAG, "Cannot save, not initialized.");
+        return;
+    }
+
+    Snapshot snap;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap.identity = identity_;
+        snap.issuers = issuers_;
+    }
+
+    msgpack_sbuffer sbuf;
+    msgpack_packer pk;
+    msgpack_sbuffer_init(&sbuf);
+    msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
+    pack_all(&pk, snap.identity, snap.issuers);
+
+    esp_err_t set_err = nvs_set_blob(handle_, NVS_KEY, sbuf.data, sbuf.size);
+    msgpack_sbuffer_destroy(&sbuf);
+
+    if (set_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set blob in NVS: %s", esp_err_to_name(set_err));
+        return;
+    }
+
+    esp_err_t commit_err = nvs_commit(handle_);
+    if (commit_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to commit NVS changes: %s", esp_err_to_name(commit_err));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Reader data successfully saved to NVS.");
 }
 
-/**
- * @brief Loads reader data from NVS into the in-memory reader data structure.
- *
- * Reads the MessagePack-serialized blob stored under the NVS key and deserializes it into
- * m_readerData. If the key is not found, the in-memory reader data is reset to defaults.
- * If the stored blob is empty or cannot be read or parsed, the in-memory state is left
- * unchanged (or reset only when key is not found) and an error is logged.
- *
- * Preconditions:
- * - The NVS namespace must be opened (m_isInitialized == true).
- */
-void ReaderDataManager::load() {
-    if (!m_isInitialized) {
+// ---------------------------------------------------------------------------
+// Load / snapshot
+// ---------------------------------------------------------------------------
+
+void NvsCredentialStore::load() {
+    if (!initialized_) {
         ESP_LOGE(TAG, "Cannot load, not initialized.");
         return;
     }
 
     size_t required_size = 0;
-    esp_err_t err = nvs_get_blob(m_nvsHandle, NVS_KEY, NULL, &required_size);
+    esp_err_t err = nvs_get_blob(handle_, NVS_KEY, NULL, &required_size);
 
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGI(TAG, "Reader data not found in NVS. Starting with a clean slate.");
-        std::lock_guard<std::mutex> lock(m_readerDataMutex);
-        m_readerData = {}; // Reset to default
+        std::lock_guard<std::mutex> lock(mutex_);
+        identity_ = {};
+        issuers_.clear();
         return;
     }
     if (err != ESP_OK) {
@@ -128,494 +288,125 @@ void ReaderDataManager::load() {
     }
 
     std::vector<uint8_t> buffer(required_size);
-    err = nvs_get_blob(m_nvsHandle, NVS_KEY, buffer.data(), &required_size);
+    err = nvs_get_blob(handle_, NVS_KEY, buffer.data(), &required_size);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Error (%s) reading blob for key '%s'", esp_err_to_name(err), NVS_KEY);
         return;
     }
-    
+
     msgpack_unpacked unpacked;
     msgpack_unpacked_init(&unpacked);
     bool success = msgpack_unpack_next(&unpacked, (const char*)buffer.data(), buffer.size(), NULL);
-    if(success) {
-        msgpack_object obj = unpacked.data;
-        readerData_t loadedReaderData{};
-        unpack_readerData_t(obj, loadedReaderData);
-        std::lock_guard<std::mutex> lock(m_readerDataMutex);
-        m_readerData = std::move(loadedReaderData);
+    if (success) {
+        ddk::ReaderIdentity loadedIdentity{};
+        std::vector<ddk::Issuer> loadedIssuers;
+        unpack_all(unpacked.data, loadedIdentity, loadedIssuers);
+        std::lock_guard<std::mutex> lock(mutex_);
+        identity_ = std::move(loadedIdentity);
+        issuers_ = std::move(loadedIssuers);
     } else {
         ESP_LOGE(TAG, "Failed to parse msgpack for reader data. Data may be corrupt.");
     }
     msgpack_unpacked_destroy(&unpacked);
 }
 
-/**
- * @brief Persist the in-memory reader data to non-volatile storage (NVS).
- *
- * Serializes the current in-memory readerData_t and writes it to NVS under the class's configured key, then commits the change.
- *
- * @return const readerData_t* Pointer to the current in-memory reader data on success, or `nullptr` on failure (for example, if the manager is not initialized or an NVS error occurs).
- *
- * @note This function persists a snapshot of the in-memory data to NVS. The returned pointer refers to the manager's
- *       current in-memory state, which may change concurrently. If you need a consistent snapshot, call
- *       getReaderDataCopy().
- */
-const readerData_t* ReaderDataManager::saveData() {
-    if (!m_isInitialized) {
-        ESP_LOGE(TAG, "Cannot save, not initialized.");
-        return nullptr;
-    }
-    const readerData_t readerDataSnapshot = getReaderDataCopy();
-    msgpack_sbuffer sbuf;
-    msgpack_packer pk;
-    msgpack_sbuffer_init(&sbuf);
-    msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
-    pack_readerData_t(&pk, readerDataSnapshot);
-
-    esp_err_t set_err = nvs_set_blob(m_nvsHandle, NVS_KEY, sbuf.data, sbuf.size);
-    msgpack_sbuffer_destroy(&sbuf);
-
-    if (set_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set blob in NVS: %s", esp_err_to_name(set_err));
-        return nullptr;
-    }
-
-    esp_err_t commit_err = nvs_commit(m_nvsHandle);
-    if (commit_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to commit NVS changes: %s", esp_err_to_name(commit_err));
-        return nullptr;
-    }
-
-    ESP_LOGI(TAG, "Reader data successfully saved to NVS.");
-    return &m_readerData;
+NvsCredentialStore::Snapshot NvsCredentialStore::snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Snapshot snap;
+    snap.identity = identity_;
+    snap.issuers = issuers_;
+    return snap;
 }
 
-/**
- * @brief Replace the in-memory reader data with the supplied data and persist it to NVS.
- *
- * @param newData The reader data to store (replaces the current in-memory state).
- * @return const readerData_t* Pointer to the stored reader data after a successful save, or `nullptr` on error.
- */
-const readerData_t* ReaderDataManager::updateReaderData(const readerData_t& newData) {
-    {
-        std::lock_guard<std::mutex> lock(m_readerDataMutex);
-        m_readerData = newData;
-    }
-    return saveData();
-}
+// ---------------------------------------------------------------------------
+// Firmware lifecycle
+// ---------------------------------------------------------------------------
 
-/**
- * @brief Clears the in-memory reader key material and persists the cleared state to NVS.
- *
- * If the manager is not initialized, no changes are made and the function returns immediately.
- *
- * @return `true` if the in-memory key was cleared (and a save attempt was issued), `false` if the manager was not initialized.
- */
-bool ReaderDataManager::eraseReaderKey() {
-    if (!m_isInitialized) {
+bool NvsCredentialStore::eraseReaderKey() {
+    if (!initialized_) {
         ESP_LOGE(TAG, "Cannot delete, not initialized.");
         return false;
     }
-    
+
     {
-        std::lock_guard<std::mutex> lock(m_readerDataMutex);
-        m_readerData.reader_gid = {};
-        m_readerData.reader_id = {};
-        m_readerData.reader_pk = {};
-        m_readerData.reader_pk_x = {};
-        m_readerData.reader_sk = {};
+        std::lock_guard<std::mutex> lock(mutex_);
+        identity_ = {};
     }
     ESP_LOGI(TAG, "In-memory reader key cleared.");
 
-    saveData();
+    save();
 
     ESP_LOGI(TAG, "Reader key successfully erased from NVS.");
     return true;
 }
 
-/**
- * @brief Erase all reader data from both in-memory state and NVS persistent storage.
- *
- * @details Clears the in-memory readerData_t, removes the stored blob under the manager's NVS key,
- * and commits the erase to NVS. Fails if the manager is not initialized or if erase/commit operations fail.
- *
- * @return true if the in-memory data was cleared and the NVS erase + commit succeeded, false otherwise.
- */
-bool ReaderDataManager::deleteAllReaderData() {
-    if (!m_isInitialized) {
+bool NvsCredentialStore::deleteAllReaderData() {
+    if (!initialized_) {
         ESP_LOGE(TAG, "Cannot delete, not initialized.");
         return false;
     }
-    
+
     {
-        std::lock_guard<std::mutex> lock(m_readerDataMutex);
-        m_readerData = {};
+        std::lock_guard<std::mutex> lock(mutex_);
+        identity_ = {};
+        issuers_.clear();
     }
     ESP_LOGI(TAG, "In-memory reader data cleared.");
 
-    esp_err_t erase_err = nvs_erase_key(m_nvsHandle, NVS_KEY);
+    esp_err_t erase_err = nvs_erase_key(handle_, NVS_KEY);
     if (erase_err != ESP_OK && erase_err != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGE(TAG, "Failed to erase NVS key '%s': %s", NVS_KEY, esp_err_to_name(erase_err));
         return false;
     }
 
-    esp_err_t commit_err = nvs_commit(m_nvsHandle);
+    esp_err_t commit_err = nvs_commit(handle_);
     if (commit_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to commit NVS erase: %s", esp_err_to_name(commit_err));
         return false;
     }
-    
+
+    HomekitEvent event{.type=ACCESSDATA_CHANGED, .data={}};
+    std::vector<uint8_t> event_data;
+    alpaca::serialize(event, event_data);
+    AppEventLoop::publish(HK_EVENT, HK_INTERNAL_EVENT, event_data.data(), event_data.size());
     ESP_LOGI(TAG, "Reader data successfully erased from NVS.");
     return true;
 }
 
-/**
- * @brief Adds a new issuer to the in-memory issuer list if an issuer with the same identifier is not already present.
- *
- * If no existing issuer has an identifier equal to `issuerId`, appends a new issuer to the manager's in-memory
- * issuers vector using `issuerId` and the first 32 bytes of `publicKey`.
- *
- * @param issuerId Byte sequence identifying the issuer.
- * @param publicKey Pointer to the issuer's public key bytes; the first 32 bytes are copied.
- * @return true if a new issuer was appended, false if an issuer with the same identifier already existed.
- */
-bool ReaderDataManager::addIssuerIfNotExists(const std::vector<uint8_t>& issuerId, const uint8_t* publicKey) {
-    std::lock_guard<std::mutex> lock(m_readerDataMutex);
-    for (const auto& issuer : m_readerData.issuers) {
-        if (issuer.issuer_id.size() == issuerId.size() && 
-            std::equal(issuer.issuer_id.begin(), issuer.issuer_id.end(), issuerId.begin())) {
+bool NvsCredentialStore::addIssuerIfNotExists(const std::vector<uint8_t>& issuerId,
+                                              const uint8_t* publicKey) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& issuer : issuers_) {
+        if (issuer.id.size() == issuerId.size() &&
+            std::equal(issuer.id.begin(), issuer.id.end(), issuerId.begin())) {
             ESP_LOGD(TAG, "Issuer already exists, skipping.");
             return false;
         }
     }
 
     ESP_LOGI(TAG, "Adding new issuer.");
-    hkIssuer_t newIssuer;
-    newIssuer.issuer_id = issuerId;
-    newIssuer.issuer_pk.assign(publicKey, publicKey + 32);
+    ddk::Issuer newIssuer;
+    newIssuer.id = issuerId;
+    newIssuer.public_key.assign(publicKey, publicKey + 32);
 
-    m_readerData.issuers.emplace_back(newIssuer);
+    issuers_.emplace_back(std::move(newIssuer));
     return true;
 }
 
-/**
- * @brief Packs an hkEndpoint_t into MessagePack format using the provided packer.
- *
- * Serializes the endpoint's seven fields: "endpointId", "last_used_at", "counter",
- * "key_type", "publicKey", "endpoint_key_x", and "persistent_key".
- *
- * @param pk MessagePack packer used to write the serialized data.
- * @param endpoint Endpoint structure whose contents will be serialized.
- */
+bool NvsCredentialStore::removeIssuerIfExists(const std::vector<uint8_t>& issuerId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = std::find_if(issuers_.begin(), issuers_.end(),
+        [&issuerId](const ddk::Issuer& issuer) {
+            return issuer.id.size() == issuerId.size() &&
+                   std::equal(issuer.id.begin(), issuer.id.end(), issuerId.begin());
+        });
 
-void ReaderDataManager::pack_hkEndpoint_t(msgpack_packer* pk, const hkEndpoint_t& endpoint) {
-    msgpack_pack_map(pk, 7); // 7 members in hkEndpoint_t
-
-    msgpack_pack_str(pk, strlen("endpointId"));
-    msgpack_pack_str_body(pk, "endpointId", strlen("endpointId"));
-    msgpack_pack_array(pk, endpoint.endpoint_id.size());
-    std::ranges::for_each(endpoint.endpoint_id, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });
-
-    msgpack_pack_str(pk, strlen("last_used_at"));
-    msgpack_pack_str_body(pk, "last_used_at", strlen("last_used_at"));
-    msgpack_pack_unsigned_int(pk, endpoint.last_used_at);
-
-    msgpack_pack_str(pk, strlen("counter"));
-    msgpack_pack_str_body(pk, "counter", strlen("counter"));
-    msgpack_pack_int(pk, endpoint.counter);
-
-    msgpack_pack_str(pk, strlen("key_type"));
-    msgpack_pack_str_body(pk, "key_type", strlen("key_type"));
-    msgpack_pack_int(pk, endpoint.key_type);
-
-    msgpack_pack_str(pk, strlen("publicKey"));
-    msgpack_pack_str_body(pk, "publicKey", strlen("publicKey"));
-    msgpack_pack_array(pk, endpoint.endpoint_pk.size());
-    std::ranges::for_each(endpoint.endpoint_pk, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });
-
-    msgpack_pack_str(pk, strlen("endpoint_key_x"));
-    msgpack_pack_str_body(pk, "endpoint_key_x", strlen("endpoint_key_x"));
-    msgpack_pack_array(pk, endpoint.endpoint_pk_x.size());
-    std::ranges::for_each(endpoint.endpoint_pk_x, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });
-
-    msgpack_pack_str(pk, strlen("persistent_key"));
-    msgpack_pack_str_body(pk, "persistent_key", strlen("persistent_key"));
-    msgpack_pack_array(pk, endpoint.endpoint_prst_k.size());
-    std::ranges::for_each(endpoint.endpoint_prst_k, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });
-}
-
-/**
- * @brief Deserialize a MessagePack object into an hkEndpoint_t structure.
- *
- * Parses a MessagePack map containing endpoint fields and populates the provided
- * hkEndpoint_t with any present entries. Recognized keys (and their target
- * members) are: "endpointId" -> endpoint_id, "last_used_at" -> last_used_at,
- * "counter" -> counter, "key_type" -> key_type, "publicKey" -> endpoint_pk,
- * "endpoint_key_x" -> endpoint_pk_x, and "persistent_key" -> endpoint_prst_k.
- *
- * If the incoming object is not a map, the function returns immediately and
- * does not modify the output parameter.
- *
- * @param obj MessagePack object expected to be a map representing an endpoint.
- * @param[out] endpoint Destination hkEndpoint_t to populate with parsed values.
- */
-void ReaderDataManager::unpack_hkEndpoint_t(msgpack_object obj, hkEndpoint_t& endpoint) {
-    if (obj.type != MSGPACK_OBJECT_MAP) {
-        ESP_LOGE(TAG, "Error: Expected map for hkEndpoint_t deserialization.");
-        return;
+    if (it == issuers_.end()) {
+        ESP_LOGD(TAG, "Issuer not found, nothing to remove.");
+        return false;
     }
 
-    std::map<std::string, msgpack_object> obj_map;
-    for (uint32_t i = 0; i < obj.via.map.size; ++i) {
-        msgpack_object_kv* kv = &obj.via.map.ptr[i];
-        if (kv->key.type == MSGPACK_OBJECT_STR) {
-            obj_map[std::string(kv->key.via.str.ptr, kv->key.via.str.size)] = kv->val;
-        }
-    }
-
-    if (obj_map.count("endpointId") && obj_map["endpointId"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["endpointId"].via.array.ptr, obj_map["endpointId"].via.array.ptr + obj_map["endpointId"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      endpoint.endpoint_id.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("last_used_at") && obj_map["last_used_at"].type == MSGPACK_OBJECT_POSITIVE_INTEGER) {
-      endpoint.last_used_at = obj_map["last_used_at"].via.u64;
-    }
-    if (obj_map.count("counter") && obj_map["counter"].type == MSGPACK_OBJECT_POSITIVE_INTEGER) { // Can be negative, but for simplicity, assuming positive
-      endpoint.counter = obj_map["counter"].via.i64;
-    }
-    if (obj_map.count("key_type") && obj_map["key_type"].type == MSGPACK_OBJECT_POSITIVE_INTEGER) { // Can be negative, but for simplicity, assuming positive
-      endpoint.key_type = obj_map["key_type"].via.i64;
-    }
-    if (obj_map.count("publicKey") && obj_map["publicKey"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["publicKey"].via.array.ptr, obj_map["publicKey"].via.array.ptr + obj_map["publicKey"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      endpoint.endpoint_pk.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("endpoint_key_x") && obj_map["endpoint_key_x"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["endpoint_key_x"].via.array.ptr, obj_map["endpoint_key_x"].via.array.ptr + obj_map["endpoint_key_x"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      endpoint.endpoint_pk_x.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("persistent_key") && obj_map["persistent_key"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["persistent_key"].via.array.ptr, obj_map["persistent_key"].via.array.ptr + obj_map["persistent_key"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      endpoint.endpoint_prst_k.assign(integer_view.begin(), integer_view.end());
-    }
-}
-
-/**
- * @brief Serializes an hkIssuer_t into MessagePack format and writes it to the given packer.
- *
- * The issuer is encoded as a map with four keys: "issuerId", "publicKey", "issuer_key_x", and "endpoints".
- * Byte-vector fields are written as arrays of unsigned bytes. The "endpoints" key is written as an array
- * of endpoint objects, each serialized as a nested MessagePack structure.
- *
- * @param pk Pointer to an active msgpack_packer used for writing the serialized data.
- * @param issuer The issuer object whose fields will be serialized into the packer.
- */
-void ReaderDataManager::pack_hkIssuer_t(msgpack_packer* pk, const hkIssuer_t& issuer) {
-    msgpack_pack_map(pk, 4); // 4 members in hkIssuer_t
-
-    msgpack_pack_str(pk, strlen("issuerId"));
-    msgpack_pack_str_body(pk, "issuerId", strlen("issuerId"));
-    msgpack_pack_array(pk, issuer.issuer_id.size());
-    std::ranges::for_each(issuer.issuer_id, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });  
-
-    msgpack_pack_str(pk, strlen("publicKey"));
-    msgpack_pack_str_body(pk, "publicKey", strlen("publicKey"));
-    msgpack_pack_array(pk, issuer.issuer_pk.size());
-    std::ranges::for_each(issuer.issuer_pk, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });  
-
-    msgpack_pack_str(pk, strlen("issuer_key_x"));
-    msgpack_pack_str_body(pk, "issuer_key_x", strlen("issuer_key_x"));
-    msgpack_pack_array(pk, issuer.issuer_pk_x.size());
-    std::ranges::for_each(issuer.issuer_pk_x, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });  
-
-    msgpack_pack_str(pk, strlen("endpoints"));
-    msgpack_pack_str_body(pk, "endpoints", strlen("endpoints"));
-    msgpack_pack_array(pk, issuer.endpoints.size());
-    for (const auto& endpoint : issuer.endpoints) {
-        pack_hkEndpoint_t(pk, endpoint);
-    }
-}
-
-/**
- * @brief Deserialize an hkIssuer_t from a MessagePack map.
- *
- * Parses the provided MessagePack object and populates the given `issuer`
- * with any present fields: `issuerId`, `publicKey`, `issuer_key_x`, and
- * `endpoints`. Array fields are converted to their corresponding byte
- * vectors; `endpoints` is deserialized into `issuer.endpoints` using
- * `unpack_hkEndpoint_t`. Fields that are not present are left unchanged.
- *
- * If `obj` is not a map, the function logs an error and returns without
- * modifying `issuer`.
- *
- * @param obj MessagePack object expected to be a map representing an hkIssuer_t.
- * @param[out] issuer Reference to the hkIssuer_t to populate.
- */
-void ReaderDataManager::unpack_hkIssuer_t(msgpack_object obj, hkIssuer_t& issuer) {
-    if (obj.type != MSGPACK_OBJECT_MAP) {
-        ESP_LOGE(TAG, "Error: Expected map for hkIssuer_t deserialization.");
-        return;
-    }
-
-    std::map<std::string, msgpack_object> obj_map;
-    for (uint32_t i = 0; i < obj.via.map.size; ++i) {
-        msgpack_object_kv* kv = &obj.via.map.ptr[i];
-        if (kv->key.type == MSGPACK_OBJECT_STR) {
-            obj_map[std::string(kv->key.via.str.ptr, kv->key.via.str.size)] = kv->val;
-        }
-    }
-
-    if (obj_map.count("issuerId") && obj_map["issuerId"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["issuerId"].via.array.ptr, obj_map["issuerId"].via.array.ptr + obj_map["issuerId"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      issuer.issuer_id.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("publicKey") && obj_map["publicKey"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["publicKey"].via.array.ptr, obj_map["publicKey"].via.array.ptr + obj_map["publicKey"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      issuer.issuer_pk.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("issuer_key_x") && obj_map["issuer_key_x"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["issuer_key_x"].via.array.ptr, obj_map["issuer_key_x"].via.array.ptr + obj_map["issuer_key_x"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      issuer.issuer_pk_x.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("endpoints") && obj_map["endpoints"].type == MSGPACK_OBJECT_ARRAY) {
-        msgpack_object_array endpoints_array = obj_map["endpoints"].via.array;
-        issuer.endpoints.resize(endpoints_array.size);
-        for (uint32_t i = 0; i < endpoints_array.size; ++i) {
-            unpack_hkEndpoint_t(endpoints_array.ptr[i], issuer.endpoints[i]);
-        }
-    }
-}
-
-/**
- * @brief Serializes a readerData_t instance into MessagePack and appends it to the packer.
- *
- * Packs a map with the keys `reader_private_key`, `reader_public_key`, `reader_key_x`,
- * `group_identifier`, `unique_identifier`, and `issuers`. Byte-array fields are written
- * as arrays of unsigned bytes; `issuers` is written as an array with each entry serialized
- * via pack_hkIssuer_t.
- *
- * @param pk Pointer to an initialized msgpack_packer that will receive the serialized data.
- * @param reader_data The readerData_t object to serialize.
- */
-void ReaderDataManager::pack_readerData_t(msgpack_packer* pk, const readerData_t& reader_data) {
-    msgpack_pack_map(pk, 6); // 6 members in readerData_t
-
-    msgpack_pack_str(pk, strlen("reader_private_key"));
-    msgpack_pack_str_body(pk, "reader_private_key", strlen("reader_private_key"));
-    msgpack_pack_array(pk, reader_data.reader_sk.size());
-    std::ranges::for_each(reader_data.reader_sk, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });  
-
-    msgpack_pack_str(pk, strlen("reader_public_key"));
-    msgpack_pack_str_body(pk, "reader_public_key", strlen("reader_public_key"));
-    msgpack_pack_array(pk, reader_data.reader_pk.size());
-    std::ranges::for_each(reader_data.reader_pk, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });  
-
-    msgpack_pack_str(pk, strlen("reader_key_x"));
-    msgpack_pack_str_body(pk, "reader_key_x", strlen("reader_key_x"));
-    msgpack_pack_array(pk, reader_data.reader_pk_x.size());
-    std::ranges::for_each(reader_data.reader_pk_x, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });  
-
-    msgpack_pack_str(pk, strlen("group_identifier"));
-    msgpack_pack_str_body(pk, "group_identifier", strlen("group_identifier"));
-    msgpack_pack_array(pk, reader_data.reader_gid.size());
-    std::ranges::for_each(reader_data.reader_gid, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });  
-
-    msgpack_pack_str(pk, strlen("unique_identifier"));
-    msgpack_pack_str_body(pk, "unique_identifier", strlen("unique_identifier"));
-    msgpack_pack_array(pk, reader_data.reader_id.size());
-    std::ranges::for_each(reader_data.reader_id, [&pk](const auto&o){
-      msgpack_pack_unsigned_char(pk, o);
-    });  
-
-    msgpack_pack_str(pk, strlen("issuers"));
-    msgpack_pack_str_body(pk, "issuers", strlen("issuers"));
-    msgpack_pack_array(pk, reader_data.issuers.size());
-    for (const auto& issuer : reader_data.issuers) {
-        pack_hkIssuer_t(pk, issuer);
-    }
-}
-
-/**
- * @brief Populate a readerData_t structure from a MessagePack object.
- *
- * Deserializes expected fields from a MessagePack map into the provided reader_data structure; missing or type-mismatched fields are left unchanged and the function returns immediately if the top-level object is not a map.
- *
- * @param obj MessagePack object expected to be a map containing keys: "reader_private_key", "reader_public_key", "reader_key_x", "group_identifier", "unique_identifier", and "issuers".
- * @param[out] reader_data Destination structure that will be updated with any fields present and correctly typed in the MessagePack map.
- */
-void ReaderDataManager::unpack_readerData_t(msgpack_object obj, readerData_t& reader_data) {
-    if (obj.type != MSGPACK_OBJECT_MAP) {
-        ESP_LOGE(TAG, "Error: Expected map for readerData_t deserialization.");
-        return;
-    }
-
-    std::map<std::string, msgpack_object> obj_map;
-    for (uint32_t i = 0; i < obj.via.map.size; ++i) {
-        msgpack_object_kv* kv = &obj.via.map.ptr[i];
-        if (kv->key.type == MSGPACK_OBJECT_STR) {
-            obj_map[std::string(kv->key.via.str.ptr, kv->key.via.str.size)] = kv->val;
-        }
-    } 
-
-    if (obj_map.count("reader_private_key") && obj_map["reader_private_key"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["reader_private_key"].via.array.ptr, obj_map["reader_private_key"].via.array.ptr + obj_map["reader_private_key"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      reader_data.reader_sk.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("reader_public_key") && obj_map["reader_public_key"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["reader_public_key"].via.array.ptr, obj_map["reader_public_key"].via.array.ptr + obj_map["reader_public_key"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      reader_data.reader_pk.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("reader_key_x") && obj_map["reader_key_x"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["reader_key_x"].via.array.ptr, obj_map["reader_key_x"].via.array.ptr + obj_map["reader_key_x"].via.array.size);
-    auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      reader_data.reader_pk_x.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("group_identifier") && obj_map["group_identifier"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["group_identifier"].via.array.ptr, obj_map["group_identifier"].via.array.ptr + obj_map["group_identifier"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      reader_data.reader_gid.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("unique_identifier") && obj_map["unique_identifier"].type == MSGPACK_OBJECT_ARRAY) {
-      auto msgpack_elements = std::ranges::subrange(obj_map["unique_identifier"].via.array.ptr, obj_map["unique_identifier"].via.array.ptr + obj_map["unique_identifier"].via.array.size);
-      auto integer_view = msgpack_elements | std::ranges::views::transform([](const msgpack_object& o){return o.via.u64;});
-      reader_data.reader_id.assign(integer_view.begin(), integer_view.end());
-    }
-    if (obj_map.count("issuers") && obj_map["issuers"].type == MSGPACK_OBJECT_ARRAY) {
-      msgpack_object_array issuers_array = obj_map["issuers"].via.array;
-      reader_data.issuers.resize(issuers_array.size);
-      for (uint32_t i = 0; i < issuers_array.size; ++i) {
-        unpack_hkIssuer_t(issuers_array.ptr[i], reader_data.issuers[i]);
-      }
-    }
+    ESP_LOGI(TAG, "Removing issuer.");
+    issuers_.erase(it);
+    return true;
 }

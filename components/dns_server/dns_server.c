@@ -13,6 +13,7 @@
 #include "esp_check.h"
 #include "esp_netif.h"
 
+#include "freertos/idf_additions.h"
 #include "lwip/err.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
@@ -277,7 +278,11 @@ dns_server_handle_t start_dns_server(dns_server_config_t *config)
     handle->num_of_entries = config->num_of_entries;
     memcpy(handle->entry, config->item, config->num_of_entries * sizeof(dns_entry_pair_t));
 
+#ifndef CONFIG_FREERTOS_UNICORE
+    xTaskCreatePinnedToCore(dns_server_task, "dns_server", 4096, handle, 5, &handle->task, 1);
+#else
     xTaskCreate(dns_server_task, "dns_server", 4096, handle, 5, &handle->task);
+#endif
     return handle;
 }
 

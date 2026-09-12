@@ -142,7 +142,7 @@ boolean HomeKitLock::LockMechanismService::update() {
  *
  * @param readerDataManager Reference to the ReaderDataManager used to persist and manage NFC reader data.
  */
-HomeKitLock::NFCAccessService::NFCAccessService(ReaderDataManager& readerDataManager) : m_readerDataManager(readerDataManager) {
+HomeKitLock::NFCAccessService::NFCAccessService(NvsCredentialStore& readerDataManager) : m_readerDataManager(readerDataManager) {
     ESP_LOGI(HomeKitLock::TAG, "Configuring NFCAccess");
     new Characteristic::ConfigurationState();
     TLV8 conf(nullptr, 0);
@@ -164,18 +164,23 @@ boolean HomeKitLock::NFCAccessService::update() {
     std::vector<uint8_t> tlvData(ctrlData.pack_size());
     ctrlData.pack(tlvData.data());
     if (tlvData.empty()) return true;
-    auto saveCallback = [this](const readerData_t& data) { return m_readerDataManager.updateReaderData(data); };
+
     auto remove_key_cb = [this]() { return m_readerDataManager.eraseReaderKey(); };
-    readerData_t readerDataCopy = m_readerDataManager.getReaderDataCopy();
-    HK_HomeKit hkCtx(readerDataCopy, saveCallback, remove_key_cb, tlvData);
+
+    HK_HomeKit hkCtx(m_readerDataManager, remove_key_cb, tlvData);
     std::vector<uint8_t> result = hkCtx.processResult();
-    TLV8 res(nullptr, 0);
-    res.unpack(result.data(), result.size());
+
+    TLV8 res(NULL, 0);
+    if (!result.empty()) {
+        res.unpack(result.data(), result.size());
+        if(auto it = res.find(0x07); res.len(it) == 3){
+            HomekitEvent event{.type=ACCESSDATA_CHANGED, .data={}};
+            std::vector<uint8_t> event_data;
+            alpaca::serialize(event, event_data);
+            AppEventLoop::publish(HK_EVENT, HK_INTERNAL_EVENT, event_data.data(), event_data.size());
+        }
+    }
     m_nfcControlPoint->setTLV(res, false);
-    HomekitEvent event{.type=ACCESSDATA_CHANGED, .data={}};
-    std::vector<uint8_t> event_data;
-    alpaca::serialize(event, event_data);
-    AppEventLoop::publish(HK_EVENT, HK_INTERNAL_EVENT, event_data.data(), event_data.size());
     return true;
 }
 

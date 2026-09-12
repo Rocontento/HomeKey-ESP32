@@ -48,15 +48,35 @@ static const std::string platform_create_id_string(void) {
 
 struct nfcGpioPins_t {
   std::string name;
+  uint8_t type;
   std::array<uint8_t, 4> gpioPins;
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+  uint8_t irqPin = 23;
+  uint8_t venPin = 22;
+#elif CONFIG_IDF_TARGET_ESP32S3
+  uint8_t irqPin = 8;
+  uint8_t venPin = 9;
+#elif CONFIG_IDF_TARGET_ESP32C3
+  uint8_t irqPin = 0;
+  uint8_t venPin = 1;
+#elif CONFIG_IDF_TARGET_ESP32
+  uint8_t irqPin = 10;
+  uint8_t venPin = 9;
+#else
+  uint8_t irqPin = 255;
+  uint8_t venPin = 255;
+#endif
 };
 
-static const std::array<nfcGpioPins_t,4> nfcGpioPinsPresets = {
+static const std::array<nfcGpioPins_t,5> nfcGpioPinsPresets = {
     {
-    {"Default", {SS_PIN, SCK_PIN, MISO_PIN, MOSI_PIN}},
-    {"@lollokara's board", {6, 5, 4, 7}},
-    {"CASmo-NFC", {5, 18, 19, 23}},
-    {"CASmo-NFC-MB-ETH", {5, 14, 12, 13}}
+      // PN532
+    {"Default", 0, {SS_PIN, SCK_PIN, MISO_PIN, MOSI_PIN}},
+    {"@lollokara's board", 0, {6, 5, 4, 7}},
+    {"CASmo-NFC", 0, {5, 18, 19, 23}},
+    {"CASmo-NFC-MB-ETH", 0, {5, 14, 12, 13}},
+      // PN7161
+    {"Default", 1, {SS_PIN, SCK_PIN, MISO_PIN, MOSI_PIN}}
     }
 };
 
@@ -139,20 +159,23 @@ namespace espConfig
   struct misc_config_t
   {
     std::string deviceName = DEVICE_NAME;
+    std::string otaPasswd = OTA_PWD;
     uint8_t hk_key_color = HOMEKEY_COLOR;
     std::string setupCode = SETUP_CODE;
-    std::string apPassword = AP_PASSWORD;
     bool lockAlwaysUnlock = HOMEKEY_ALWAYS_UNLOCK;
     bool lockAlwaysLock = HOMEKEY_ALWAYS_LOCK;
     bool hkAuthPrecomputeEnabled = HK_AUTH_PRECOMPUTE_ENABLED;
     bool nfcFastPollingEnabled = NFC_FAST_POLLING_ENABLED;
+    uint8_t nfcReaderType = NFC_READER_TYPE;
+    uint8_t nfcIrqPin = NFC_IRQ_PIN;
+    uint8_t nfcVenPin = NFC_VEN_PIN;
     uint8_t controlPin = HS_PIN;
     uint8_t hsStatusPin = HS_STATUS_LED;
     bool webAuthEnabled = WEB_AUTH_ENABLED;
     std::string webUsername = WEB_AUTH_USERNAME;
     std::string webPassword = WEB_AUTH_PASSWORD;
     bool webHttpsEnabled = false;
-    uint8_t nfcPinsPreset = 255;
+    uint8_t nfcPinsPreset = NFC_ACTIVE_PRESET;
     std::array<uint8_t, 4> nfcGpioPins{SS_PIN, SCK_PIN, MISO_PIN, MOSI_PIN};
     uint8_t btrLowStatusThreshold = BTR_PROX_BAT_LOW_THRESHOLD;
     bool proxBatEnabled = BTR_PROX_BAT_ENABLED;
@@ -162,7 +185,8 @@ namespace espConfig
     uint8_t ethSpiBus = ETH_SPI_BUS;
     std::array<uint8_t, 5> ethRmiiConfig = {ETH_RMII_CONF_PHY_ADDR, ETH_RMII_CONF_MDC_PIN, ETH_RMII_CONF_MDIO_PIN, ETH_RMII_CONF_POWER_PIN, ETH_RMII_CONF_RMII_CLOCK_MODE};
     std::array<uint8_t, 7> ethSpiConfig = {ETH_SPI_CONF_SPI_FREQ_MHZ, ETH_SPI_CONF_PIN_CS, ETH_SPI_CONF_PIN_IRQ, ETH_SPI_CONF_PIN_RST, ETH_SPI_CONF_PIN_SCK, ETH_SPI_CONF_PIN_MISO, ETH_SPI_CONF_PIN_MOSI};
-    uint8_t logLevel = ESP_LOG_ERROR;
+    bool overrideStrappingRestriction = false;
+    std::string accessPointPassword = AP_PASSWORD;
   };
   struct actions_config_t {
     enum colorMap

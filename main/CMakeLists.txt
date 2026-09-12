@@ -1,9 +1,9 @@
 idf_component_register(SRCS "main.cpp" "app_events.cpp" "app_event_loop.cpp" "ConfigManager.cpp" "ReaderDataManager.cpp"
                     "HardwareManager.cpp" "HomeKitLock.cpp" "LockManager.cpp"
-                    "MqttManager.cpp" "HKServices.cpp" "NfcManager.cpp" "WebServerManager.cpp" "WebSocketLogSinker.cpp"
-                    "ConsoleLogSinker.cpp" "PowerManager.cpp"
+                    "MqttManager.cpp" "HKServices.cpp" "NfcManager.cpp" "Pn532Reader.cpp" "Pn7160Reader.cpp" "St25r3916Reader.cpp" "WebServerManager.cpp" "WebSocketLogSinker.cpp"
+                    "ConsoleLogSinker.cpp" "GPIOAllocator.cpp"
                     INCLUDE_DIRS "include"
-                    PRIV_REQUIRES HomeSpan pn532_hal DigitalDoorKey esp_https_server mqtt libsodium
+                    PRIV_REQUIRES HomeSpan pn532_hal pn7160 DigitalDoorKey esp_https_server mqtt libsodium
                     msgpack-c json loggable loggable_espidf esp_wifi dns_server)
 
 include(FetchContent)
@@ -26,8 +26,4 @@ if(NOT DEFINED ENV{CI})
 else()
   littlefs_create_partition_image(spiffs ../data/dist FLASH_IN_PROJECT)
 endif()
-if(HK_DEV)
-  target_compile_definitions(${COMPONENT_LIB} PUBLIC "-DLOG_LOCAL_LEVEL=ESP_LOG_VERBOSE")
-else()
-  target_compile_definitions(${COMPONENT_LIB} PUBLIC "-DLOG_LOCAL_LEVEL=ESP_LOG_INFO")
-endif()
+target_compile_definitions(${COMPONENT_LIB} PUBLIC "-DLOG_LOCAL_LEVEL=ESP_LOG_VERBOSE")
