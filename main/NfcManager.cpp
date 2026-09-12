@@ -390,6 +390,10 @@ void NfcManager::handleTagPresence(const std::vector<uint8_t>& uid, const std::a
         if (attempt > 0) {
             ESP_LOGW(TAG, "Link error, re-activating tag (retry %d/%d)", attempt, kLinkErrorRetries);
             m_reader->releaseTag();
+            // A bare release was seen to leave the phone answering the next
+            // SELECT with another protocol error; cycling the field forces a
+            // clean activation instead.
+            m_reader->resetField();
             vTaskDelay(pdMS_TO_TICKS(kLinkErrorRetryDelayMs));
             std::vector<uint8_t> uid2;
             std::array<uint8_t,2> atqa2;

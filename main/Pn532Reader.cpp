@@ -2,6 +2,8 @@
 #include "esp_log.h"
 #include "pn532_cxx/transaction.hpp"
 #include <array>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 Pn532Reader::Pn532Reader(const std::array<uint8_t, 4>& gpioPins, const std::array<uint8_t, 18>& ecpData)
     : m_ecpData(ecpData),
@@ -117,6 +119,17 @@ void Pn532Reader::releaseTag() {
 
 void Pn532Reader::endDiscovery() {
     // No explicit discovery stop required for PN532.
+}
+
+void Pn532Reader::resetField() {
+    if (!m_frontend) return;
+    // RFConfiguration CfgItem 0x01: bit0 = RF field on, bit1 = AutoRFCA.
+    // Drop the carrier for a few ms so the phone sees a real field reset
+    // (ISO 14443 requires >5 ms) and forgets the broken ISO-DEP session,
+    // then restore the same setting init() uses.
+    (void)m_frontend->RFConfiguration(0x01, {0x02});
+    vTaskDelay(pdMS_TO_TICKS(10));
+    (void)m_frontend->RFConfiguration(0x01, {0x03});
 }
 
 bool Pn532Reader::exchangeApdu(const std::vector<uint8_t>& send,
