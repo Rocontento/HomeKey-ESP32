@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Chips to build, JSON array (e.g. ["esp32c6"])'
+        required: false
+        default: '["esp32", "esp32c3", "esp32c6", "esp32s3"]'
+        type: string
   push:
     branches:
       - main
@@ -127,7 +133,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [esp32, esp32c3, esp32c6, esp32s3]
+        # Manual runs can narrow the set via the "targets" input; pushes and
+        # tags always build every chip.
+        target: ${{ fromJSON(github.event.inputs.targets || '["esp32", "esp32c3", "esp32c6", "esp32s3"]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6

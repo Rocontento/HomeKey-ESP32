@@ -40,6 +40,7 @@ public:
     bool isTagStillPresent() override;
     void releaseTag() override;
     void endDiscovery() override;
+    void resetField() override;
 
     bool exchangeApdu(const std::vector<uint8_t>& send,
                       std::vector<uint8_t>& recv,

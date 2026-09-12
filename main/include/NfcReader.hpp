@@ -80,6 +80,14 @@ public:
      */
     virtual void endDiscovery() = 0;
 
+    /**
+     * @brief Briefly drop and restore the RF field so a tag that is stuck in a
+     * half-finished ISO-DEP session performs a full fresh activation on the
+     * next poll. Used on link-error retries. Optional: readers that cannot
+     * (or need not) do this keep the default no-op.
+     */
+    virtual void resetField() {}
+
     // -------------------------------------------------------------------------
     // Communication
     // -------------------------------------------------------------------------

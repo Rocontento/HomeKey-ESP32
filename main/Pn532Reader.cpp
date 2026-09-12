@@ -2,6 +2,8 @@
 #include "esp_log.h"
 #include "pn532_cxx/transaction.hpp"
 #include <array>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 Pn532Reader::Pn532Reader(const std::array<uint8_t, 4>& gpioPins, const std::array<uint8_t, 18>& ecpData)
     : m_ecpData(ecpData),
@@ -119,17 +121,46 @@ void Pn532Reader::endDiscovery() {
     // No explicit discovery stop required for PN532.
 }
 
+void Pn532Reader::resetField() {
+    if (!m_frontend) return;
+    // RFConfiguration CfgItem 0x01: bit0 = RF field on, bit1 = AutoRFCA.
+    // Drop the carrier for a few ms so the phone sees a real field reset
+    // (ISO 14443 requires >5 ms) and forgets the broken ISO-DEP session,
+    // then restore the same setting init() uses.
+    (void)m_frontend->RFConfiguration(0x01, {0x02});
+    vTaskDelay(pdMS_TO_TICKS(10));
+    (void)m_frontend->RFConfiguration(0x01, {0x03});
+}
+
 bool Pn532Reader::exchangeApdu(const std::vector<uint8_t>& send,
                                std::vector<uint8_t>& recv,
                                uint32_t timeoutMs) {
     if (!m_frontend || send.size() > 255) return false;
     recv.clear();
     pn532::Status status = m_frontend->InDataExchange(send, recv, timeoutMs);
-    if (status != pn532::Status::SUCCESS) return false;
-    // Strip PN532 status bytes (first 2 bytes of response)
-    if (recv.size() >= 2) {
-        recv.erase(recv.begin(), recv.begin() + 2);
+    if (status != pn532::Status::SUCCESS) {
+        ESP_LOGW(TAG, "InDataExchange transport failure (status=%d, apdu=%02X%02X)",
+                 static_cast<int>(status), send.size() > 0 ? send[0] : 0,
+                 send.size() > 1 ? send[1] : 0);
+        return false;
     }
+    // Response layout: [0x41] [PN532 status] [card data...]
+    if (recv.size() < 2) {
+        ESP_LOGW(TAG, "InDataExchange short frame (%zu bytes)", recv.size());
+        recv.clear();
+        return false;
+    }
+    // Low 6 bits carry the PN532 error code (0x00 = OK). See PN532 User
+    // Manual table 15: 0x01 timeout, 0x02 CRC, 0x03 parity, 0x05 framing,
+    // 0x0B RF protocol error, 0x29 target released, 0x2B card disappeared.
+    const uint8_t pn532Err = recv[1] & 0x3F;
+    if (pn532Err != 0x00) {
+        ESP_LOGW(TAG, "InDataExchange PN532 error 0x%02X (apdu=%02X%02X)", pn532Err,
+                 send.size() > 0 ? send[0] : 0, send.size() > 1 ? send[1] : 0);
+        recv.clear();
+        return false;
+    }
+    recv.erase(recv.begin(), recv.begin() + 2);
     return true;
 }
 

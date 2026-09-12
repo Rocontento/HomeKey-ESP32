@@ -44,7 +44,20 @@ std::unique_ptr<ddk::Session> NfcManager::buildAuthSession() {
         if (!m_reader || send.size() > 255) {
           return false;
         }
-        return m_reader->exchangeApdu(send, recv, 1000);
+        const bool ok = m_reader->exchangeApdu(send, recv, 1000);
+        // Diagnostic: a reply that is only a status word (no payload) is
+        // otherwise logged upstream as "<empty>", hiding whether the phone
+        // answered e.g. 6985 (not armed) or the reader reported an RF error.
+        if (ok && recv.size() <= 2) {
+          ESP_LOGW(TAG, "APDU %02X%02X answered with status-only reply: %s",
+                   send.size() > 0 ? send[0] : 0, send.size() > 1 ? send[1] : 0,
+                   recv.empty() ? "(none)" : fmt::format("{:02X}", fmt::join(recv, "")).c_str());
+        } else if (!ok) {
+          m_linkError = true;
+          ESP_LOGW(TAG, "APDU %02X%02X exchange failed at reader level",
+                   send.size() > 0 ? send[0] : 0, send.size() > 1 ? send[1] : 0);
+        }
+        return ok;
       };
   ddk::SessionConfig config;
   config.target_flow = authFlow;
@@ -258,7 +271,10 @@ void NfcManager::pollingTask() {
     	}
     }
 
-    const uint16_t passiveTargetTimeoutMs = 500;
+    // Host-side cap on how long we wait for InListPassiveTarget to come back.
+    // Passive activation retries are 0, so the PN532 makes a single attempt
+    // and returns almost immediately; this only bounds a wedged reader.
+    const uint16_t passiveTargetTimeoutMs = 150;
     const TickType_t pollDelayTicks =
         pdMS_TO_TICKS(m_nfcFastPollingEnabled ? 5 : 100);
 
@@ -314,13 +330,34 @@ void NfcManager::pollingTask() {
 					continue;
         }
 
+        // Post-transaction cooldown: after a HomeKey transaction the phone is
+        // often still resting on the reader. Re-activating it immediately
+        // starts a second transaction the phone will not complete (it must
+        // leave and re-enter the field), which ends in a "flow failed" and an
+        // error shown on the phone even though the door already opened.
+        if (m_txnCooldownTicks != 0 &&
+            (xTaskGetTickCount() - m_lastTxnTick) < m_txnCooldownTicks) {
+            vTaskDelay(pollDelayTicks);
+            continue;
+        }
+        m_txnCooldownTicks = 0;
+
         std::vector<uint8_t> uid;
         std::array<uint8_t,2> atqa;
         uint8_t sak;
         if (m_reader->pollForTag(uid, atqa, sak, passiveTargetTimeoutMs)) {
             ESP_LOGI(TAG, "NFC tag detected!");
+            m_lastTxnOutcome = TxnOutcome::None;
             handleTagPresence(uid, atqa, sak);
             waitForTagRemoval();
+            if (m_lastTxnOutcome != TxnOutcome::None) {
+                m_lastTxnTick = xTaskGetTickCount();
+                m_txnCooldownTicks = pdMS_TO_TICKS(
+                    m_lastTxnOutcome == TxnOutcome::Success ? kPostSuccessCooldownMs
+                                                            : kPostFailureCooldownMs);
+                ESP_LOGD(TAG, "Post-transaction cooldown: %u ms",
+                         (unsigned)(m_txnCooldownTicks * portTICK_PERIOD_MS));
+            }
         }
 
         vTaskDelay(pollDelayTicks);
@@ -337,19 +374,72 @@ void NfcManager::pollingTask() {
  */
 void NfcManager::handleTagPresence(const std::vector<uint8_t>& uid, const std::array<uint8_t,2>& atqa, const uint8_t& sak) {
     auto startTime = std::chrono::high_resolution_clock::now();
-    uint8_t selectAppletCmd[] = { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x08, 0x58, 0x01, 0x01, 0x00 };
-    std::vector<uint8_t> response;
-    bool ok = m_reader->exchangeApdu(std::vector<uint8_t>(selectAppletCmd, selectAppletCmd + sizeof(selectAppletCmd)), response, 500);
+    const std::vector<uint8_t> selectAppletCmd = { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x08, 0x58, 0x01, 0x01, 0x00 };
 
-    // Check for success SW1=0x90, SW2=0x00
-    if (ok && response.size() >= 2 && response[response.size() - 2] == 0x90 && response[response.size() - 1] == 0x00) {
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, response.data(), response.size(), ESP_LOG_DEBUG);
-        ESP_LOGI(TAG, "HomeKey applet selected successfully.");
-        handleHomeKeyAuth(response);
-    } else {
+    // Link-level retry. With the PN532 the first exchange right after
+    // activation sometimes dies with an RF protocol error (PN532 status 0x0B)
+    // on the SELECT or on Auth0, while the very next attempt succeeds. Rather
+    // than dropping the tag and letting the phone time out with an error on
+    // screen, re-activate it and try again within ~100 ms. Only ISO-DEP tags
+    // (SAK bit 0x20) are retried: a MIFARE Classic never answers an APDU and
+    // must keep reaching the generic-tag path immediately.
+    const bool isoDep = (sak & 0x20) != 0;
+    const int maxAttempts = isoDep ? 1 + kLinkErrorRetries : 1;
+
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        if (attempt > 0) {
+            ESP_LOGW(TAG, "Link error, re-activating tag (retry %d/%d)", attempt, kLinkErrorRetries);
+            m_reader->releaseTag();
+            // A bare release was seen to leave the phone answering the next
+            // SELECT with another protocol error; cycling the field forces a
+            // clean activation instead.
+            m_reader->resetField();
+            vTaskDelay(pdMS_TO_TICKS(kLinkErrorRetryDelayMs));
+            std::vector<uint8_t> uid2;
+            std::array<uint8_t,2> atqa2;
+            uint8_t sak2 = 0;
+            if (!m_reader->pollForTag(uid2, atqa2, sak2, 100)) {
+                ESP_LOGW(TAG, "Tag no longer present, giving up retry.");
+                break;
+            }
+        }
+
+        m_linkError = false;
+        std::vector<uint8_t> response;
+        const bool ok = m_reader->exchangeApdu(selectAppletCmd, response, 500);
+        if (!ok) {
+            // Reader-level failure (transport or PN532 error), the tag never
+            // answered. Retry if we can; otherwise fall through to the generic
+            // path below on the last attempt so behaviour for odd tags is kept.
+            m_linkError = true;
+            if (attempt + 1 < maxAttempts) continue;
+            ESP_LOGW(TAG, "SELECT failed at reader level after %d attempt(s).", attempt + 1);
+            ESP_LOGD(TAG, "Passive target UID: %s (%zu)", fmt::format("{:02X}", fmt::join(uid, "")).c_str(), uid.size());
+            handleGenericTag(uid, atqa, sak);
+            break;
+        }
+
+        // Check for success SW1=0x90, SW2=0x00
+        if (response.size() >= 2 && response[response.size() - 2] == 0x90 && response[response.size() - 1] == 0x00) {
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, response.data(), response.size(), ESP_LOG_DEBUG);
+            ESP_LOGI(TAG, "HomeKey applet selected successfully.");
+            m_linkError = false;
+            handleHomeKeyAuth(response);
+            // Auth failed because the link broke mid-flow (not because the
+            // phone rejected us): run the whole thing again on a fresh
+            // activation. The phone has not seen any control-flow command in
+            // this case, so a new transaction is clean.
+            if (m_lastTxnOutcome == TxnOutcome::Failure && m_linkError && attempt + 1 < maxAttempts) {
+                continue;
+            }
+            break;
+        }
+
+        // The tag answered, just not with our applet: a real non-HomeKey tag.
         ESP_LOGI(TAG, "Not a HomeKey tag, or failed to select applet.");
         ESP_LOGD(TAG, "Passive target UID: %s (%zu)", fmt::format("{:02X}", fmt::join(uid, "")).c_str(), uid.size());
         handleGenericTag(uid, atqa, sak);
+        break;
     }
 
     auto stopTime = std::chrono::high_resolution_clock::now();
@@ -443,13 +533,13 @@ void NfcManager::handleHomeKeyAuth(const std::vector<uint8_t>& select_response) 
         }
 
         auto outcome = profile.finalize(session);
+        m_lastTxnOutcome = outcome ? TxnOutcome::Success : TxnOutcome::Failure;
         if (outcome) {
             ESP_LOGI(TAG, "Endpoint authenticated in %lli ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - startTime).count());
             publishAuthResult(outcome, m_readerDataManager.reader_identity().sub_identifier);
-            profile.control_flow(session, 0x01, 0x00);
-        } else {
-            profile.control_flow(session, 0x00, 0x00);
         }
+        // No extra control-flow command here: Profile::step already sent the
+        // success/failure CONTROL FLOW, and a second one is answered 6A82.
     };
 
     auto authenticateCold = [&]() {
