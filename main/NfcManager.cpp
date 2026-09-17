@@ -395,13 +395,28 @@ void NfcManager::handleTagPresence(const std::vector<uint8_t>& uid, const std::a
             // clean activation instead.
             m_reader->resetField();
             vTaskDelay(pdMS_TO_TICKS(kLinkErrorRetryDelayMs));
+            // After a field reset the phone takes a few hundred ms to re-arm
+            // its card emulation, and a single poll was seen to miss it while
+            // it was still resting on the reader. Keep polling for a while.
             std::vector<uint8_t> uid2;
             std::array<uint8_t,2> atqa2;
             uint8_t sak2 = 0;
-            if (!m_reader->pollForTag(uid2, atqa2, sak2, 100)) {
-                ESP_LOGW(TAG, "Tag no longer present, giving up retry.");
+            const TickType_t reacquireStart = xTaskGetTickCount();
+            bool reacquired = false;
+            while ((xTaskGetTickCount() - reacquireStart) * portTICK_PERIOD_MS < kLinkErrorReacquireMs) {
+                if (m_reader->pollForTag(uid2, atqa2, sak2, 100)) {
+                    reacquired = true;
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+            if (!reacquired) {
+                ESP_LOGW(TAG, "Tag no longer present after %u ms, giving up retry.",
+                         (unsigned)kLinkErrorReacquireMs);
                 break;
             }
+            ESP_LOGI(TAG, "Tag re-acquired after %u ms",
+                     (unsigned)((xTaskGetTickCount() - reacquireStart) * portTICK_PERIOD_MS));
         }
 
         m_linkError = false;
