@@ -85,6 +85,7 @@ private:
     // --- Link-level retry (polling task only) ---
     static constexpr int kLinkErrorRetries = 2;
     static constexpr uint32_t kLinkErrorRetryDelayMs = 30;
+    static constexpr uint32_t kLinkErrorReacquireMs = 600;  // how long to wait for the tag to reappear
     bool m_linkError = false;  // set when an APDU exchange failed at reader level
     TickType_t m_lastTxnTick = 0;
     TickType_t m_txnCooldownTicks = 0;
