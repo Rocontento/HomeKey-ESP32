@@ -132,6 +132,31 @@ void Pn532Reader::resetField() {
     (void)m_frontend->RFConfiguration(0x01, {0x03});
 }
 
+namespace {
+const char* pn532ErrorName(uint8_t code) {
+    switch (code) {
+        case 0x01: return "timeout, no answer from the tag";
+        case 0x02: return "CRC error in the tag response";
+        case 0x03: return "parity error in the tag response";
+        case 0x04: return "bit-count error during anticollision";
+        case 0x05: return "framing error";
+        case 0x07: return "RF buffer overflow";
+        case 0x0A: return "RF field never switched on";
+        case 0x0B: return "RF protocol error";
+        case 0x0D: return "antenna overheating";
+        case 0x0E: return "internal buffer overflow";
+        case 0x13: return "invalid parameter / DEP frame";
+        case 0x25: return "command not acceptable in this state";
+        case 0x26: return "operation not allowed in this configuration";
+        case 0x29: return "target released the link";
+        case 0x2A: return "card ID mismatch";
+        case 0x2B: return "the card disappeared from the field";
+        case 0x2D: return "over-current detected";
+        default:   return "unknown";
+    }
+}
+}  // namespace
+
 bool Pn532Reader::exchangeApdu(const std::vector<uint8_t>& send,
                                std::vector<uint8_t>& recv,
                                uint32_t timeoutMs) {
@@ -155,7 +180,12 @@ bool Pn532Reader::exchangeApdu(const std::vector<uint8_t>& send,
     // 0x0B RF protocol error, 0x29 target released, 0x2B card disappeared.
     const uint8_t pn532Err = recv[1] & 0x3F;
     if (pn532Err != 0x00) {
-        ESP_LOGW(TAG, "InDataExchange PN532 error 0x%02X (apdu=%02X%02X)", pn532Err,
+        // Named here because the numeric code alone says nothing about where
+        // to look: 0x01/0x02/0x03 are all "the RF link is marginal" (antenna
+        // tuning, coupling distance, supply droop), while 0x29/0x2B mean the
+        // phone simply left the field.
+        ESP_LOGW(TAG, "InDataExchange PN532 error 0x%02X (%s) (apdu=%02X%02X)",
+                 pn532Err, pn532ErrorName(pn532Err),
                  send.size() > 0 ? send[0] : 0, send.size() > 1 ? send[1] : 0);
         recv.clear();
         return false;

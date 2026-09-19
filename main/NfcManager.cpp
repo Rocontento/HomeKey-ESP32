@@ -38,6 +38,13 @@ void NfcManager::invalidateAuthCache() {
   m_readerDataGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 
+// HomeKey CONTROL FLOW command, "transaction succeeded" variant.
+// Layout: CLA=0x80, INS=0x3C, P1=0x01 (success), P2=0x00, no Lc/Le.
+static bool isControlFlowSuccess(const std::vector<uint8_t>& apdu) {
+  return apdu.size() == 4 && apdu[0] == 0x80 && apdu[1] == 0x3C &&
+         apdu[2] == 0x01;
+}
+
 std::unique_ptr<ddk::Session> NfcManager::buildAuthSession() {
   std::function<bool(std::vector<uint8_t>&, std::vector<uint8_t>&)> nfcFn =
       [this](std::vector<uint8_t>& send, std::vector<uint8_t>& recv) -> bool {
@@ -45,6 +52,25 @@ std::unique_ptr<ddk::Session> NfcManager::buildAuthSession() {
           return false;
         }
         const bool ok = m_reader->exchangeApdu(send, recv, 1000);
+
+        // CONTROL FLOW "success" (80 3C 01 00) is the courtesy notification
+        // that tells the phone the transaction ended well -- it carries no
+        // security value and by the time it is sent the endpoint is already
+        // cryptographically authenticated. The phone is usually being lifted
+        // off the reader at that exact moment, so this is the single APDU
+        // most likely to die with an RF error, and losing its acknowledgement
+        // used to fail the whole flow and leave the door shut after a
+        // perfectly good tap. Treat a reader-level loss here as delivered.
+        // Note this cannot turn a rejected tap into an open door: the failure
+        // notification is 80 3C 00 00 and its answer is discarded upstream.
+        if (!ok && isControlFlowSuccess(send)) {
+          ESP_LOGW(TAG,
+                   "CONTROL FLOW ack lost at reader level; endpoint is already "
+                   "authenticated, completing the transaction anyway.");
+          recv = {0x90, 0x00};
+          return true;
+        }
+
         // Diagnostic: a reply that is only a status word (no payload) is
         // otherwise logged upstream as "<empty>", hiding whether the phone
         // answered e.g. 6985 (not armed) or the reader reported an RF error.
