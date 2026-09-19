@@ -4,7 +4,7 @@ idf_component_register(SRCS "main.cpp" "app_events.cpp" "app_event_loop.cpp" "Co
                     "ConsoleLogSinker.cpp" "GPIOAllocator.cpp" "EthernetDriver.cpp" "KeypadManager.cpp" "AccessCodeManager.cpp"
                     INCLUDE_DIRS "include"
                     PRIV_REQUIRES HomeSpan pn532_hal pn7160 DigitalDoorKey esp_https_server mqtt libsodium
-                    msgpack-c json loggable loggable_espidf esp_wifi esp_pm dns_server esp_driver_gpio)
+                    msgpack-c json loggable loggable_espidf esp_wifi dns_server esp_driver_gpio)
 
 include(FetchContent)
 
