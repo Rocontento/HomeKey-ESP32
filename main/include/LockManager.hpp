@@ -95,6 +95,25 @@ private:
 
     esp_timer_handle_t momentaryStateTimer = nullptr;
 
+    // Until startup finishes, the lock refuses to be unlocked by anything: a
+    // physical lock comes up locked after a reboot or a power cut, never in
+    // whatever state it happened to be left in.
+    //
+    // Normally lifted by begin(). The deadline is a backstop for the paths
+    // where begin() is never reached -- an unprovisioned device parks in the
+    // captive portal and never returns from it -- so the guard can protect the
+    // startup window without ever being able to wedge the lock shut.
+    static constexpr int64_t kBootGuardUs = 30ll * 1000 * 1000;
+    bool m_bootGuard = true;
+    int64_t m_bootUs = 0;
+    bool bootGuardActive() const {
+      return m_bootGuard && (esp_timer_get_time() - m_bootUs) < kBootGuardUs;
+    }
+    /// States in which the door is able to open.
+    static bool isOpenState(uint8_t state) {
+      return state == lockStates::UNLOCKED || state == lockStates::UNLOCKING;
+    }
+
     static const char* TAG;
     static void handleTimer(void* instance);
     void stopMomentaryTimer();

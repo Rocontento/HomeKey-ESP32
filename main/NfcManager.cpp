@@ -17,6 +17,7 @@
 #include "St25r3916Reader.hpp"
 #include "hal/gpio_types.h"
 #include "magic_enum.hpp"
+#include "RfQuietWindow.hpp"
 #include "utils.hpp"
 
 #include <array>
@@ -38,6 +39,13 @@ void NfcManager::invalidateAuthCache() {
   m_readerDataGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 
+// HomeKey CONTROL FLOW command, "transaction succeeded" variant.
+// Layout: CLA=0x80, INS=0x3C, P1=0x01 (success), P2=0x00, no Lc/Le.
+static bool isControlFlowSuccess(const std::vector<uint8_t>& apdu) {
+  return apdu.size() == 4 && apdu[0] == 0x80 && apdu[1] == 0x3C &&
+         apdu[2] == 0x01;
+}
+
 std::unique_ptr<ddk::Session> NfcManager::buildAuthSession() {
   std::function<bool(std::vector<uint8_t>&, std::vector<uint8_t>&)> nfcFn =
       [this](std::vector<uint8_t>& send, std::vector<uint8_t>& recv) -> bool {
@@ -45,6 +53,25 @@ std::unique_ptr<ddk::Session> NfcManager::buildAuthSession() {
           return false;
         }
         const bool ok = m_reader->exchangeApdu(send, recv, 1000);
+
+        // CONTROL FLOW "success" (80 3C 01 00) is the courtesy notification
+        // that tells the phone the transaction ended well -- it carries no
+        // security value and by the time it is sent the endpoint is already
+        // cryptographically authenticated. The phone is usually being lifted
+        // off the reader at that exact moment, so this is the single APDU
+        // most likely to die with an RF error, and losing its acknowledgement
+        // used to fail the whole flow and leave the door shut after a
+        // perfectly good tap. Treat a reader-level loss here as delivered.
+        // Note this cannot turn a rejected tap into an open door: the failure
+        // notification is 80 3C 00 00 and its answer is discarded upstream.
+        if (!ok && isControlFlowSuccess(send)) {
+          ESP_LOGW(TAG,
+                   "CONTROL FLOW ack lost at reader level; endpoint is already "
+                   "authenticated, completing the transaction anyway.");
+          recv = {0x90, 0x00};
+          return true;
+        }
+
         // Diagnostic: a reply that is only a status word (no payload) is
         // otherwise logged upstream as "<empty>", hiding whether the phone
         // answered e.g. 6985 (not armed) or the reader reported an RF error.
@@ -160,7 +187,14 @@ NfcManager::NfcManager(NvsCredentialStore& readerDataManager,
   });
 }
 
-NfcManager::~NfcManager() = default;
+NfcManager::~NfcManager() {
+#if CONFIG_PM_ENABLE
+  if (m_pmLock) {
+    esp_pm_lock_delete(m_pmLock);
+    m_pmLock = nullptr;
+  }
+#endif
+}
 
 /**
  * @brief Initialize the selected NFC reader and start the NFC polling task.
@@ -203,6 +237,15 @@ bool NfcManager::begin() {
     	ESP_LOGE(TAG, "Unsupported NFC reader type: %u", m_nfcReaderType);
     	return false;
     }
+#if CONFIG_PM_ENABLE
+    if (!m_pmLock &&
+        esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "nfc_txn", &m_pmLock) != ESP_OK) {
+        // Not fatal: without it the tap still works, it just runs with DFS
+        // free to change the clocks underneath it.
+        ESP_LOGW(TAG, "Could not create the NFC power-management lock.");
+        m_pmLock = nullptr;
+    }
+#endif
     ESP_LOGI(TAG, "Auth precompute %s.", m_hkAuthPrecomputeEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "NFC fast polling: %s", m_nfcFastPollingEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "Starting NFC polling task...");
@@ -374,6 +417,24 @@ void NfcManager::pollingTask() {
  */
 void NfcManager::handleTagPresence(const std::vector<uint8_t>& uid, const std::array<uint8_t,2>& atqa, const uint8_t& sak) {
     auto startTime = std::chrono::high_resolution_clock::now();
+
+    // Everything below is one continuous RF exchange with the phone. Ask the
+    // rest of the firmware to keep off the air until it is over (see
+    // RfQuietWindow) and pin the clocks so dynamic frequency scaling cannot
+    // re-lock a PLL between two APDUs. Both are released on every exit path.
+    RfQuietWindow::Scope quiet;
+#if CONFIG_PM_ENABLE
+    struct PmLockScope {
+        esp_pm_lock_handle_t h;
+        explicit PmLockScope(esp_pm_lock_handle_t lock) : h(lock) {
+            if (h) esp_pm_lock_acquire(h);
+        }
+        ~PmLockScope() { if (h) esp_pm_lock_release(h); }
+        PmLockScope(const PmLockScope&) = delete;
+        PmLockScope& operator=(const PmLockScope&) = delete;
+    } pmLock(m_pmLock);
+#endif
+
     const std::vector<uint8_t> selectAppletCmd = { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x08, 0x58, 0x01, 0x01, 0x00 };
 
     // Link-level retry. With the PN532 the first exchange right after

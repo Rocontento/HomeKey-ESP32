@@ -9,6 +9,7 @@
 #include "app_event_loop.hpp"
 #include "fmt/ranges.h"
 #include "WebServerManager.hpp"
+#include "RfQuietWindow.hpp"
 #include "ConfigManager.hpp"
 #include "HomeSpan.h"
 #include "MqttManager.hpp"
@@ -250,7 +251,10 @@ void WebServerManager::begin() {
       return;
     }
   }
-  m_wsQueue = xQueueCreate(20, sizeof(WsFrame *));
+  // Deep enough to hold one tap's worth of log lines while the WebSocket
+  // sender is parked for an RF quiet window (see RfQuietWindow): a DEBUG-level
+  // tap emits roughly fifteen, and the queue stores pointers, not payloads.
+  m_wsQueue = xQueueCreate(64, sizeof(WsFrame *));
   if (!m_wsQueue) {
     ESP_LOGE(TAG, "Failed to create WebSocket queue");
     httpd_stop(m_server);
@@ -1910,7 +1914,12 @@ void WebServerManager::queue_ws_frame(int fd, const uint8_t *payload,
     memcpy(frame->payload, payload, len);
   }
 
-  if (xQueueSend(m_wsQueue, &frame, pdMS_TO_TICKS(100)) != pdTRUE) {
+  // Non-blocking on purpose. Log lines reach here from the NFC task, in the
+  // middle of a HomeKey exchange; the previous 100 ms wait meant that a slow
+  // or stalled WebSocket client could park that task between two APDUs and
+  // let the phone's transaction time out. A dropped debug line is cheaper
+  // than a door that does not open.
+  if (xQueueSend(m_wsQueue, &frame, 0) != pdTRUE) {
     if (frame->payload != frame->inlinePayload)
       delete[] frame->payload;
     delete frame;
@@ -1928,6 +1937,13 @@ void WebServerManager::ws_send_task(void *arg) {
         continue;
 
       WsFramePtr frame(raw_frame);
+
+      // Hold off while a tap is being exchanged with a phone. Sending here
+      // means a WiFi transmit burst, and on boards where the reader shares
+      // the 3V3 rail with the ESP32 that burst is enough to corrupt the
+      // phone's reply. Bounded internally, so a tap that never finishes
+      // delays this by at most RfQuietWindow::kMaxWindowMs.
+      RfQuietWindow::waitWhileActive();
 
       int target_fd = -1;
       {

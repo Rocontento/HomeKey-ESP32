@@ -15,6 +15,26 @@ const std::array<const char*, 6> pixelTypeMap = { "RGB", "RBG", "BRG", "BGR", "G
 
 
 /**
+ * @brief The level an output pin rests at when its function is not active.
+ *
+ * For ACTION this is the locked state, and it is the answer to "what should
+ * this pin be doing while the firmware is still booting". Anything else means
+ * the lock actuates on its own before the first command is ever issued.
+ */
+bool HardwareManager::idleLevelFor(PinFunctions func) const {
+  switch (func) {
+    case ACTION:         return m_miscConfig.gpioActionLockState;
+    case SUCCESS:        return !m_miscConfig.nfcSuccessHL;
+    case FAIL:           return !m_miscConfig.nfcFailHL;
+    case TAG_EVENT:      return !m_miscConfig.tagEventHL;
+    case ALT_ACTION:     return !m_miscConfig.hkAltActionGpioState;
+    case ALT_ACTION_LED: return false;
+    case PIXEL:          return false;  // WS2812 data line idles low
+    default:             return false;
+  }
+}
+
+/**
  * @brief Initialize HardwareManager state and register event topics and subscribers.
  *
  * Constructs the HardwareManager by storing the provided configuration, initializing task and
@@ -34,22 +54,33 @@ HardwareManager::HardwareManager(const espConfig::actions_config_t& miscConfig)
       m_lockControlTaskHandle(nullptr),
       m_lockControlQueue(nullptr)
 {
+  // Every output is claimed at its resting level, never at whatever the GPIO
+  // output register happens to hold. For the action pin that resting level is
+  // "locked", and getting it wrong means the door opens by itself on every
+  // boot -- see idleLevelFor() and the GPIOLease constructor.
   pinAllocations.emplace(PinFunctions::ACTION,
-      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.gpioActionPin), GPIO_MODE_OUTPUT, "ACTION_PIN"));
+      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.gpioActionPin), GPIO_MODE_OUTPUT, "ACTION_PIN",
+                                        idleLevelFor(PinFunctions::ACTION)));
   pinAllocations.emplace(PinFunctions::SUCCESS,
-      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.nfcSuccessPin), GPIO_MODE_OUTPUT, "SUCCESS_AUTH"));
+      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.nfcSuccessPin), GPIO_MODE_OUTPUT, "SUCCESS_AUTH",
+                                        idleLevelFor(PinFunctions::SUCCESS)));
   pinAllocations.emplace(PinFunctions::FAIL,
-      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.nfcFailPin), GPIO_MODE_OUTPUT, "FAIL_AUTH"));
+      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.nfcFailPin), GPIO_MODE_OUTPUT, "FAIL_AUTH",
+                                        idleLevelFor(PinFunctions::FAIL)));
   pinAllocations.emplace(PinFunctions::PIXEL,
-      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.nfcNeopixelPin), GPIO_MODE_OUTPUT, "NEOPIXEL_PIN"));
+      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.nfcNeopixelPin), GPIO_MODE_OUTPUT, "NEOPIXEL_PIN",
+                                        idleLevelFor(PinFunctions::PIXEL)));
   pinAllocations.emplace(PinFunctions::ALT_ACTION,
-      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.hkAltActionPin), GPIO_MODE_OUTPUT, "ALT_ACTION"));
+      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.hkAltActionPin), GPIO_MODE_OUTPUT, "ALT_ACTION",
+                                        idleLevelFor(PinFunctions::ALT_ACTION)));
   pinAllocations.emplace(PinFunctions::ALT_ACTION_LED,
-      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.hkAltActionInitLedPin), GPIO_MODE_OUTPUT, "ALT_ACTION_LED"));
+      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.hkAltActionInitLedPin), GPIO_MODE_OUTPUT, "ALT_ACTION_LED",
+                                        idleLevelFor(PinFunctions::ALT_ACTION_LED)));
   pinAllocations.emplace(PinFunctions::ALT_ACTION_INIT,
       GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.hkAltActionInitPin), GPIO_MODE_INPUT, "INIT_ALT_ACTION"));
   pinAllocations.emplace(PinFunctions::TAG_EVENT,
-      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.tagEventPin), GPIO_MODE_OUTPUT, "TAG_EVENT_PIN"));
+      GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.tagEventPin), GPIO_MODE_OUTPUT, "TAG_EVENT_PIN",
+                                        idleLevelFor(PinFunctions::TAG_EVENT)));
   for(auto &p : pinAllocations){
     if(!p.second.has_value()){
       ESP_LOGW(TAG, "Could not acquire GPIO Pin for '%s' with error '%s'", magic_enum::enum_name(p.first).cbegin(), magic_enum::enum_name(p.second.error()).cbegin());
@@ -111,12 +142,15 @@ HardwareManager::HardwareManager(const espConfig::actions_config_t& miscConfig)
 
     auto& alloc_entry = pinAllocations.at(meta->func);
     gpio_mode_t mode = meta->default_mode;
-    bool level = false;
+    // Deliberately the resting level and not the outgoing pin's: gpio_get_level
+    // on a pad configured as a plain output reads the input register, which is
+    // disabled, so the old value was never trustworthy. Re-assigning the action
+    // pin therefore parks the new one locked, which is the safe direction.
+    const bool level = idleLevelFor(meta->func);
 
     if (alloc_entry.has_value()) {
       auto& lease = alloc_entry.value();
       mode = lease.get_mode();
-      level = lease.get_level();
 
       if (meta->func == PinFunctions::ALT_ACTION_INIT) {
         // We don't uninstall the ISR as it might be used by the Ethernet driver
@@ -133,11 +167,8 @@ HardwareManager::HardwareManager(const espConfig::actions_config_t& miscConfig)
       return;
     }
 
-    auto new_lease = GPIOAllocator::instance().acquire(gpio_num_t(s.newValue), mode, meta->tag);
+    auto new_lease = GPIOAllocator::instance().acquire(gpio_num_t(s.newValue), mode, meta->tag, level);
     if (new_lease.has_value()) {
-      if (mode != GPIO_MODE_INPUT) {
-        new_lease.value().set_level(level);
-      }
 
       if (meta->func == PinFunctions::ALT_ACTION_INIT) {
         new_lease.value().set_pullup(true);
@@ -206,6 +237,17 @@ void HardwareManager::begin() {
     ESP_LOGI(TAG, "Initializing hardware pins...");
 
     // --- Initialize GPIO Pins ---
+    // The action pin is already claimed at its locked level by the constructor;
+    // assert it once more here and latch it, so that the pad is unambiguously
+    // parked locked before any event source is able to command it.
+    if(pinAllocations.at(ACTION).has_value()){
+      auto& action = pinAllocations.at(ACTION).value();
+      gpio_hold_dis(action.get_pin());
+      action.set_level(idleLevelFor(ACTION));
+      gpio_hold_en(action.get_pin());
+      ESP_LOGI(TAG, "Action pin %d parked in the locked state (level %d).",
+               m_miscConfig.gpioActionPin, idleLevelFor(ACTION));
+    }
     if(pinAllocations.at(SUCCESS).has_value()){
       pinAllocations.at(SUCCESS).value().set_level(!m_miscConfig.nfcSuccessHL);
     }

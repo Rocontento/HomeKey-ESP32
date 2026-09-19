@@ -154,6 +154,11 @@ private:
       TAG_EVENT
     };
 
+    /// The level an output rests at while its function is inactive. For the
+    /// action pin that is the locked state, which is what the pad must be
+    /// driving from the instant it becomes an output.
+    bool idleLevelFor(PinFunctions func) const;
+
     std::map<PinFunctions, std::expected<GPIOAllocator::GPIOLease, GPIOAllocator::GPIOAllocatorError>> pinAllocations;
     bool isr_service_installed;
 };

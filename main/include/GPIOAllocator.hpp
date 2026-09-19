@@ -94,7 +94,30 @@ public:
 
   private:
     friend class GPIOAllocator;
-    GPIOLease(gpio_num_t pin, gpio_mode_t mode) : pin_(pin), mode_(mode) {gpio_set_direction(pin, mode);};
+    GPIOLease(gpio_num_t pin, gpio_mode_t mode, bool initial_level)
+        : pin_(pin), mode_(mode) {
+      // Order matters here, and on a pin that drives a door lock it matters a
+      // great deal.
+      //
+      // A pad left held by a previous run ignores writes until the hold is
+      // lifted, and that hold outlives a CPU reset, so lift it first --
+      // otherwise a reset taken while the door was unlocked would keep the
+      // relay closed.
+      //
+      // Then the level, and only then the direction. The GPIO output register
+      // reads back 0 out of reset, so enabling the driver before writing a
+      // level drives the pad LOW for as long as it takes the owner to set it:
+      // on an action pin wired active-low that is the relay closing and the
+      // door opening on every single boot and brownout recovery. Writing the
+      // level while the pad is still an input is legal and does exactly what
+      // is wanted -- the value lands in the output register and reaches the
+      // pin the instant the driver comes up.
+      gpio_hold_dis(pin);
+      if (mode != GPIO_MODE_INPUT && mode != GPIO_MODE_DISABLE) {
+        gpio_set_level(pin, initial_level);
+      }
+      gpio_set_direction(pin, mode);
+    };
     void reset() {
       if (pin_ != GPIO_NUM_NC && pin_ >= 0 && pin_ < GPIO_NUM_MAX) {
         gpio_reset_pin(pin_);
@@ -106,7 +129,14 @@ public:
     gpio_mode_t mode_ = GPIO_MODE_INPUT_OUTPUT_OD;
   };
 
-  std::expected<GPIOLease, GPIOAllocatorError> acquire(gpio_num_t pin, gpio_mode_t mode, const std::string &tag) {
+  /**
+   * @param initial_level For output modes, the level the pad is driven to the
+   *        moment it becomes an output. Callers that drive anything with a
+   *        safe resting state -- a lock relay above all -- must pass that
+   *        state rather than rely on the default.
+   */
+  std::expected<GPIOLease, GPIOAllocatorError> acquire(gpio_num_t pin, gpio_mode_t mode, const std::string &tag,
+                                                       bool initial_level = false) {
     std::lock_guard lock(mutex_);
     if((uint8_t)pin == (uint8_t)GPIO_NUM_NC){
       return std::unexpected<GPIOAllocatorError>(INVALID_GPIO_NUM);
@@ -136,7 +166,7 @@ public:
       return std::unexpected<GPIOAllocatorError>(ALREADY_OWNED);
     }
     owners_[pin] = tag;
-    return GPIOLease(pin, mode);
+    return GPIOLease(pin, mode, initial_level);
   }
 
   [[nodiscard]] std::optional<std::string> owner_of(uint8_t pin) const {
