@@ -110,6 +110,12 @@ private:
     esp_mqtt_client_handle_t m_client;
     const std::string &device_name;
     bool m_isConnected = false;
+    // Last state handed to publishLockState, republished on every connect so
+    // the retained message on the broker is the device's real state rather
+    // than whatever a previous session left behind. Seeded with
+    // LockManager::LOCKED by the constructor, which is what the lock boots as.
+    int m_lastCurrentState;
+    int m_lastTargetState;
     
     // SSL/TLS related members
     bool m_sslConfigured;

@@ -28,6 +28,8 @@ MqttManager::MqttManager(const ConfigManager& configManager)
       m_mqttSslConfig(configManager.getMqttSslConfig()),
       m_client(nullptr),
       device_name(configManager.getConfig<espConfig::misc_config_t>().deviceName),
+      m_lastCurrentState(LockManager::LOCKED),
+      m_lastTargetState(LockManager::LOCKED),
       m_sslConfigured(false)
 {
 }
@@ -347,6 +349,13 @@ void MqttManager::onConnected() {
     if (m_mqttConfig.hassMqttDiscoveryEnabled) {
         publishHassDiscovery();
     }
+
+    // The state topic is published retained, so until now a reconnecting
+    // broker handed subscribers whatever this device last said -- from a
+    // previous session, possibly "unlocked" from before a power cut. Refresh
+    // it with the state the device actually holds, after the discovery config
+    // so Home Assistant has the entity by the time the state lands.
+    publishLockState(m_lastCurrentState, m_lastTargetState);
 }
 
 /**
@@ -452,6 +461,8 @@ void MqttManager::onData(const std::string& topic, const std::string& data) {
  */
 
 void MqttManager::publishLockState(const int currentState, const int targetState) {
+    m_lastCurrentState = currentState;
+    m_lastTargetState = targetState;
     std::string stateStr;
     if (currentState != targetState) {
         stateStr = (targetState == LockManager::UNLOCKED) ? std::to_string(LockManager::UNLOCKING) : std::to_string(LockManager::LOCKING);
