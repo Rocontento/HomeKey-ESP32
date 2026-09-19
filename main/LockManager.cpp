@@ -24,6 +24,7 @@ LockManager::LockManager(const espConfig::misc_config_t& miscConfig, const espCo
       m_currentState(lockStates::LOCKED),
       m_targetState(lockStates::LOCKED)
 {
+  m_bootUs = esp_timer_get_time();
   m_override_state_event = AppEventLoop::subscribe(LOCK_EVENT, LOCK_OVERRIDE_STATE, [&](const uint8_t* data, size_t size){
       if(size == 0 || data == nullptr) return;
       std::span<const uint8_t> payload(data, size);
@@ -111,6 +112,11 @@ void LockManager::begin() {
   std::array<uint8_t, sizeof(EventLockState)> d{};
   size_t d_len = alpaca::serialize(s, d);
   AppEventLoop::publish(HW_EVENT, HW_ACTION, d.data(), d_len);
+
+  // Startup is over and the relay has been told to sit locked. From here on
+  // unlock requests are real ones.
+  m_bootGuard = false;
+  ESP_LOGI(TAG, "Startup complete, lock armed in the locked state.");
 }
 
 /**
@@ -198,6 +204,11 @@ int LockManager::getTargetState() const {
  */
 
 void LockManager::setTargetState(uint8_t state, Source source) {
+    if (bootGuardActive() && isOpenState(state)) {
+        ESP_LOGW(TAG, "Refusing to unlock during startup (source %d).", static_cast<int>(source));
+        return;
+    }
+
     if (state == m_targetState && m_currentState == m_targetState) {
         ESP_LOGD(TAG, "Requested state is already the current state. No action taken.");
         return;
@@ -243,6 +254,17 @@ void LockManager::setTargetState(uint8_t state, Source source) {
  * @param source Origin of the override, used for momentary timer decisions.
  */
 void LockManager::overrideState(uint8_t c_state, uint8_t t_state, Source source) {
+    // The last line of defence for the boot path. Sources that restore a
+    // remembered state -- HomeKit characteristics out of NVS, a retained MQTT
+    // command replayed on connect -- reach the relay through here, and an
+    // unlock arriving before the device has finished starting is never a
+    // person asking for the door to open.
+    if (bootGuardActive() && (isOpenState(c_state) || isOpenState(t_state))) {
+        ESP_LOGW(TAG, "Ignoring unlocked state reported by source %d during startup (c:%d,t:%d).",
+                 static_cast<int>(source), c_state, t_state);
+        return;
+    }
+
     if (c_state == m_currentState && t_state == m_targetState) {
         stopMomentaryTimer();
         startMomentaryTimerIfNeeded(source);

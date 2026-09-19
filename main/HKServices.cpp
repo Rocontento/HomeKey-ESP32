@@ -99,11 +99,25 @@ HomeKitLock::LockManagementService::LockManagementService() {
  */
 HomeKitLock::LockMechanismService::LockMechanismService(HomeKitLock& bridge, LockManager& lockManager) : m_lockManager(lockManager) {
     ESP_LOGI(HomeKitLock::TAG, "Configuring LockMechanism");
-    m_lockCurrentState = bridge.m_lockCurrentState = new Characteristic::LockCurrentState(m_lockManager.getCurrentState(), true);
-    m_lockTargetState = bridge.m_lockTargetState = new Characteristic::LockTargetState(m_lockManager.getTargetState(), true);
+    // A lock comes up locked. Always.
+    //
+    // These two characteristics must NOT be persisted to NVS (the second
+    // argument). HomeSpan restores a persisted value inside the constructor,
+    // before anything else has run, and the restored value was then published
+    // as LOCK_OVERRIDE_STATE below -- which LockManager turns into a hardware
+    // action on the relay. The result was that losing power, or simply
+    // rebooting, while the door was unlocked re-opened the door on the next
+    // boot, with no tap and no command from anyone. Do not set these back to
+    // true: the last known lock state is not worth restoring, and restoring it
+    // is an open door.
+    m_lockCurrentState = bridge.m_lockCurrentState = new Characteristic::LockCurrentState(m_lockManager.getCurrentState(), false);
+    m_lockTargetState = bridge.m_lockTargetState = new Characteristic::LockTargetState(m_lockManager.getTargetState(), false);
+    // Announce the manager's own state rather than the characteristics'. The
+    // manager starts LOCKED, so this startup announcement can never command an
+    // unlock even if the characteristics were somehow to carry one.
     EventLockState s{
-      .currentState = static_cast<uint8_t>(m_lockCurrentState->getNewVal()),
-      .targetState = static_cast<uint8_t>(m_lockTargetState->getNewVal()),
+      .currentState = static_cast<uint8_t>(m_lockManager.getCurrentState()),
+      .targetState = static_cast<uint8_t>(m_lockManager.getTargetState()),
       .source = LockManager::HOMEKIT
     };
     std::vector<uint8_t> d;
