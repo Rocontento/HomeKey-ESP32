@@ -7,6 +7,8 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "app_event_loop.hpp"
+#include "app_events.hpp"
+#include "EthernetDriver.hpp"
 #include "fmt/ranges.h"
 #include "WebServerManager.hpp"
 #include "RfQuietWindow.hpp"
@@ -43,7 +45,6 @@
 #include <esp_tls_crypto.h>
 #include <stdbool.h>
 #include <string>
-#include <thread>
 #include <vector>
 #include "JsonGuard.hpp"
 
@@ -52,7 +53,7 @@
 // ============================================================================
 
 const char *WebServerManager::TAG = "WebServerManager";
-const size_t MAX_WS_PAYLOAD = 8192;
+const size_t MAX_WS_PAYLOAD = 1024;
 const size_t HEAP_UPPER_THRESHOLD = 70 * 1000;
 const size_t HEAP_LOWER_THRESHOLD = 50 * 1000;
 
@@ -67,23 +68,70 @@ static inline bool str_ends_with(const char *str, const char *suffix) {
   return lenstr >= lensuf && memcmp(str + lenstr - lensuf, suffix, lensuf) == 0;
 }
 
-inline constexpr const char *kNfcOwnerNames[] = {
-    "SPI2_SS", "SPI2_SCK", "SPI2_MISO", "SPI2_MOSI",  // PN532 / PN7160
-    "I2C_SDA", "I2C_SCL",                             // ST25R3916
-    "NFC_IRQ", "NFC_VEN",                             // PN7160 side pins
-};
+inline std::optional<std::string> check_pin_reassignment(uint8_t incoming_pin,
+                                                         uint8_t current_pin,
+                                                         const std::string& key,
+                                                         int array_index,
+                                                         bool override_strapping) {
+    if (incoming_pin == current_pin || incoming_pin == 255) return std::nullopt;
 
-inline bool decideNfcPin(uint8_t incoming_pin,
-                          uint8_t current_pin,
-                          const std::optional<std::string> &owner_of_incoming,
-                          bool override_strapping) {
-    if (incoming_pin == current_pin) return true;
-    if (!owner_of_incoming.has_value()) return true;
+    GPIOAllocator::PinRole role = GPIOAllocator::PinRole::GpioOut;
+    GPIOAllocator::PinConsumer consumer = GPIOAllocator::PinConsumer::Hardware;
+    bool output_capable = true;
+    if (key == "nfcGpioPins") {
+      consumer = GPIOAllocator::PinConsumer::Nfc;
+      switch (array_index) {
+        case 0: role = GPIOAllocator::PinRole::SpiCs;   break; // SS / SDA
+        case 1: role = GPIOAllocator::PinRole::SpiSck;  break; // SCK / SCL
+        case 2: role = GPIOAllocator::PinRole::SpiMiso; break;
+        case 3: role = GPIOAllocator::PinRole::SpiMosi; break;
+      }
+    } else if (key == "nfcIrqPin") {
+      consumer = GPIOAllocator::PinConsumer::Nfc;
+      role = GPIOAllocator::PinRole::NfcIrq;
+    } else if (key == "nfcVenPin") {
+      consumer = GPIOAllocator::PinConsumer::Nfc;
+      role = GPIOAllocator::PinRole::NfcVen;
+    } else if (key == "ethSpiConfig") {
+      consumer = GPIOAllocator::PinConsumer::Eth;
+      switch (array_index) {
+        case 1: role = GPIOAllocator::PinRole::SpiCs;   break; // CS
+        case 2: role = GPIOAllocator::PinRole::EthIrq;  break; // IRQ
+        case 3: role = GPIOAllocator::PinRole::EthRst;  break; // RST
+        case 4: role = GPIOAllocator::PinRole::SpiSck;  break; // SCK
+        case 5: role = GPIOAllocator::PinRole::SpiMiso; break;
+        case 6: role = GPIOAllocator::PinRole::SpiMosi; break;
+      }
+    } else if (key == "controlPin") {
+      consumer = GPIOAllocator::PinConsumer::HomeKit;
+      role = GPIOAllocator::PinRole::GpioIn;
+      output_capable = false;
+    } else if (key == "hsStatusPin") {
+      consumer = GPIOAllocator::PinConsumer::HomeKit;
+      role = GPIOAllocator::PinRole::Led;
+    } else if (key == "nfcSuccessPin" || key == "nfcFailPin" ||
+               key == "tagEventPin" || key == "hkAltActionInitLedPin") {
+      consumer = GPIOAllocator::PinConsumer::Hardware;
+      role = GPIOAllocator::PinRole::Led;
+    } else if (key == "hkAltActionInitPin") {
+      consumer = GPIOAllocator::PinConsumer::Hardware;
+      role = GPIOAllocator::PinRole::Irq;
+      output_capable = false;
+    }
 
-    if (owner_of_incoming == "STRAPPING") return override_strapping;
-
-    return std::any_of(std::begin(kNfcOwnerNames), std::end(kNfcOwnerNames),
-                        [&](const char *name) { return owner_of_incoming == name; });
+    auto status = GPIOAllocator::instance().status_of(incoming_pin);
+    if (status.strapping && status.holders.empty()) {
+      if (override_strapping) return std::nullopt;
+      return std::string("is a strapping pin and strapping override is disabled");
+    }
+    auto verdict = GPIOAllocator::instance().validate(
+        gpio_num_t(incoming_pin),
+        output_capable ? GPIO_MODE_OUTPUT : GPIO_MODE_INPUT,
+        role, consumer);
+    if (verdict) return std::nullopt;
+    return std::string(GPIOAllocator::error_str(verdict.error())) +
+           " (currently held by: " +
+           GPIOAllocator::instance().owner_of(incoming_pin).value_or("unknown") + ")";
 }
 
 // ============================================================================
@@ -211,7 +259,7 @@ void WebServerManager::begin() {
   httpd_ssl_config_t ssl_config = HTTPD_SSL_CONFIG_DEFAULT();
   ssl_config.httpd.max_uri_handlers = 22;
   ssl_config.httpd.max_open_sockets = 4;
-  ssl_config.httpd.stack_size = 6144;
+  ssl_config.httpd.stack_size = 8192;
   ssl_config.httpd.uri_match_fn = httpd_uri_match_wildcard;
   ssl_config.httpd.lru_purge_enable = true;
   ssl_config.httpd.backlog_conn = 4;
@@ -312,19 +360,24 @@ void WebServerManager::end() {
   }
 
   if (m_wsTaskHandle) {
-    vTaskDelete(m_wsTaskHandle);
+    WsFrame *sentinel = new WsFrame{};
+    sentinel->fd = -1;
+    if (xQueueSend(m_wsQueue, &sentinel, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000)) == 0) {
+        ESP_LOGW(TAG, "ws_send_task did not exit in time; forcing deletion");
+        vTaskDelete(m_wsTaskHandle);
+      }
+    } else {
+      ESP_LOGW(TAG, "Failed to enqueue shutdown sentinel; forcing deletion");
+      vTaskDelete(m_wsTaskHandle);
+    }
     m_wsTaskHandle = nullptr;
   }
 
   if (m_wsQueue) {
     WsFrame* frame = nullptr;
     while (xQueueReceive(m_wsQueue, &frame, 0) == pdPASS) {
-      if (frame) {
-        if (frame->payload != frame->inlinePayload) {
-          delete[] frame->payload;
-        }
-        delete frame;
-      }
+      delete frame; // payload lifetime is managed by sharedData/inline buffer
     }
     vQueueDelete(m_wsQueue);
     m_wsQueue = nullptr;
@@ -353,13 +406,20 @@ bool WebServerManager::basicAuth(httpd_req_t* req){
     ESP_LOGD(TAG, "Invalid HTTP Header, authorization failed");
     return false;
   }
-  const std::string cred = fmt::format("{}:{}", m_configManager.getConfig<espConfig::misc_config_t>().webUsername, m_configManager.getConfig<espConfig::misc_config_t>().webPassword);
-  size_t n = 0;
-  esp_crypto_base64_encode(NULL, 0, &n, (const uint8_t*)cred.c_str(), cred.size());
-  std::string digest = "Basic ";
-  digest.resize(6+n);
-  esp_crypto_base64_encode((uint8_t *)digest.data() + 6, digest.size(), &n, (const uint8_t *)cred.c_str(), cred.size());
-  return authReq == digest;
+  const auto& cred = m_configManager.getConfig<espConfig::misc_config_t>();
+  std::scoped_lock lock(m_authDigestMutex);
+  if (!m_authDigestValid || m_authDigestUser != cred.webUsername || m_authDigestPass != cred.webPassword) {
+    const std::string userpass = fmt::format("{}:{}", cred.webUsername, cred.webPassword);
+    size_t n = 0;
+    esp_crypto_base64_encode(NULL, 0, &n, (const uint8_t*)userpass.c_str(), userpass.size());
+    m_authDigest = "Basic ";
+    m_authDigest.resize(6+n);
+    esp_crypto_base64_encode((uint8_t *)m_authDigest.data() + 6, m_authDigest.size(), &n, (const uint8_t *)userpass.c_str(), userpass.size());
+    m_authDigestUser = cred.webUsername;
+    m_authDigestPass = cred.webPassword;
+    m_authDigestValid = true;
+  }
+  return authReq == m_authDigest;
 }
 
 // ============================================================================
@@ -389,10 +449,17 @@ esp_err_t WebServerManager::ws_post_handshake_cb(httpd_req_t *req) {
   }
 
   if(!instance->m_wsBroadcastBuffer.empty()){
-    for (auto &v : instance->m_wsBroadcastBuffer) {
+    std::vector<std::vector<uint8_t>> backlog;
+    {
+      std::scoped_lock lock(instance->m_wsBroadcastMutex);
+      backlog.assign(std::make_move_iterator(instance->m_wsBroadcastBuffer.begin()),
+                     std::make_move_iterator(instance->m_wsBroadcastBuffer.end()));
+      instance->m_wsBroadcastBuffer.clear();
+      instance->m_wsBroadcastBytes = 0;
+    }
+    for (auto &v : backlog) {
       instance->queue_ws_frame(sockfd, v.data(), v.size(), HTTPD_WS_TYPE_TEXT);
     }
-    instance->m_wsBroadcastBuffer.clear();
   }
 
   return ESP_OK;
@@ -597,21 +664,16 @@ esp_err_t WebServerManager::handleStaticFiles(httpd_req_t *req) {
   if (use_compressed)
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
 
-  char *buffer = (char*)malloc(4096); 
-  if (!buffer) {
-      file.close();
-      return ESP_ERR_NO_MEM;
-  }
+  char buffer[4096];
 
   size_t bytes_read;
   esp_err_t err = ESP_OK;
-  while ((bytes_read = file.read((uint8_t*)buffer, 4096)) > 0) {
+  while ((bytes_read = file.read((uint8_t*)buffer, sizeof(buffer))) > 0) {
       err = httpd_resp_send_chunk(req, buffer, bytes_read);
       vTaskDelay(pdMS_TO_TICKS(5));
       if (err != ESP_OK) break;
   }
 
-  free(buffer);
   file.close();
   if (err != ESP_OK) {
       httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "TLS send error");
@@ -631,14 +693,14 @@ esp_err_t WebServerManager::handleStaticFiles(httpd_req_t *req) {
  */
 esp_err_t WebServerManager::handleRootOrHash(httpd_req_t *req) {
   WebServerManager* instance = getInstance(req);
-  char sessionId[65];
+  char sessionId[65] = {};
   size_t sessionIdLen = sizeof(sessionId);
   esp_err_t err = httpd_req_get_cookie_val(req, "sessionId", sessionId, &sessionIdLen);
   if(!instance->basicAuth(req)){
     return sendAuthFailure(req);
   }
   std::string sessionCookie;
-  if(instance->m_sessionId.compare(sessionId) != 0 || err != ESP_OK){
+  if(err != ESP_OK || instance->m_sessionId.compare(sessionId) != 0){
     sessionCookie = fmt::format("sessionId={};", instance->m_sessionId);
     httpd_resp_set_hdr(req, "Set-Cookie", sessionCookie.c_str());
   }
@@ -747,8 +809,8 @@ esp_err_t WebServerManager::handleGetNfcPresets(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-  JsonBuilder response = JsonBuilder::object();
-  response.withArray("presets", [&](JsonBuilder& presetsArray) {
+  JsonBuilder presets = JsonBuilder::object();
+  presets.withArray("presets", [&](JsonBuilder& presetsArray) {
     for (auto &&v : nfcGpioPinsPresets) {
       JsonBuilder preset = JsonBuilder::object();
       preset.addString("name", v.name.c_str());
@@ -763,6 +825,8 @@ esp_err_t WebServerManager::handleGetNfcPresets(httpd_req_t *req) {
       presetsArray.addItemToArray(std::move(preset).release());
     }
   });
+  JsonBuilder response = JsonBuilder::object();
+  response.addItem("data", std::move(presets).release());
   response.addBool("success", true);
 
   std::string resp = response.toStringUnformatted();
@@ -1026,6 +1090,12 @@ bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData, cJS
     overrideStrapping = getInstance(req)->m_configManager.getConfig<espConfig::misc_config_t>().overrideStrappingRestriction;
   }
 
+  cJSON *readerTypeItem = cJSON_GetObjectItem(obj, "nfcReaderType");
+  const uint8_t effectiveReaderType =
+      (readerTypeItem && cJSON_IsNumber(readerTypeItem))
+          ? static_cast<uint8_t>(readerTypeItem->valueint)
+          : getInstance(req)->m_configManager.getConfig<espConfig::misc_config_t>().nfcReaderType;
+
   cJSON *it = obj->child;
   while (it) {
     std::string keyStr = it->string;
@@ -1089,6 +1159,14 @@ bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData, cJS
     }
     // Pin validation
     else if (str_ends_with(keyStr.c_str(), "Pin")) {
+      // IRQ/VEN only exist on the PN7161 reader; for other reader types the
+      // values are meaningless and must not fail validation.
+      const bool nfcReaderPins = keyStr == "nfcIrqPin" || keyStr == "nfcVenPin";
+      if (nfcReaderPins && effectiveReaderType != 1) {
+        it = it->next;
+        continue;
+      }
+
       // Reject anything outside uint8_t range BEFORE truncating, so a value
       // like 256 can't wrap to a valid-looking pin (0) and slip past both
       // the GPIO-validity check and the ownership check below.
@@ -1115,28 +1193,10 @@ bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData, cJS
                                     existingValue->valueint <= 255)
                                         ? static_cast<uint8_t>(existingValue->valueint)
                                         : uint8_t{255};
-      const bool    isNfcScalar  = (keyStr == "nfcIrqPin" || keyStr == "nfcVenPin");
-      auto          currentOwner = GPIOAllocator::instance().owner_of(incomingPin);
-
-      if (isNfcScalar) {
-        auto decision = decideNfcPin(incomingPin, currentPin, currentOwner, overrideStrapping);
-        if (!decision) {
-          std::string msg = std::to_string(incomingPin) +
-                            " for \"" + keyStr + "\" already owned by \"" +
-                            currentOwner.value() + "\".";
-          sendJsonError(req, msg);
-          return false;
-        }
-      } else if (incomingPin != currentPin && currentOwner.has_value()) {
-        bool isAllowedStrapping = (currentOwner == "STRAPPING" && overrideStrapping);
-        bool isAllowedSPI = currentOwner->contains("SPI"); // Unify behavior with array elements
-        if (!isAllowedStrapping && !isAllowedSPI) {
-          std::string msg = std::to_string(incomingPin) +
-                            " for \"" + keyStr + "\" already owned by \"" +
-                            currentOwner.value() + "\".";
-          sendJsonError(req, msg);
-          return false;
-        }
+      if (auto error = check_pin_reassignment(incomingPin, currentPin, keyStr, -1, overrideStrapping)) {
+        std::string msg = std::to_string(incomingPin) + " for \"" + keyStr + "\" " + *error + ".";
+        sendJsonError(req, msg);
+        return false;
       }
     } else if (keyStr == "ethSpiBus" && cJSON_IsNumber(incomingValue) && (incomingValue->valueint < SPI2_HOST || incomingValue->valueint >= SPI_HOST_MAX)){
         std::string msg = std::to_string(incomingValue->valueint) +
@@ -1144,7 +1204,6 @@ bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData, cJS
         sendJsonError(req, msg);
         return false;
     } else if ((str_ends_with(keyStr.c_str(), "Pins") || str_ends_with(keyStr.c_str(), "SpiConfig")) && cJSON_IsArray(incomingValue)){
-      const bool isNfcArray = (keyStr == "nfcGpioPins");
       cJSON *currentArr = cJSON_GetObjectItem(currentData, keyStr.c_str());
       cJSON *el = NULL;
       int idx = 0;
@@ -1168,27 +1227,10 @@ bool WebServerManager::validateRequest(httpd_req_t *req, cJSON *currentData, cJS
             if (ce && cJSON_IsNumber(ce) && ce->valueint >= 0 && ce->valueint <= 255)
               currentPin = static_cast<uint8_t>(ce->valueint);
           }
-          auto currentOwner = GPIOAllocator::instance().owner_of(elPin);
-
-          if (isNfcArray) {
-            auto decision = decideNfcPin(elPin, currentPin, currentOwner, overrideStrapping);
-            if (!decision) {
-              std::string msg = std::to_string(elPin) +
-                                " for \"" + keyStr + "\" already owned by \"" +
-                                currentOwner.value() + "\".";
-              sendJsonError(req, msg);
-              return false;
-            }
-          } else if (elPin != currentPin && currentOwner.has_value()) {
-            bool isAllowedSPI = currentOwner->contains("SPI");
-            bool isAllowedStrapping = (currentOwner == "STRAPPING" && overrideStrapping);
-            if (!isAllowedSPI && !isAllowedStrapping) {
-              std::string msg = std::to_string(elPin) +
-                                " for \"" + keyStr + "\" already owned by \"" +
-                                currentOwner.value() + "\".";
-              sendJsonError(req, msg);
-              return false;
-            }
+          if (auto error = check_pin_reassignment(elPin, currentPin, keyStr, idx, overrideStrapping)) {
+            std::string msg = std::to_string(elPin) + " for \"" + keyStr + "\" " + *error + ".";
+            sendJsonError(req, msg);
+            return false;
           }
         }
         idx++;
@@ -1315,10 +1357,8 @@ esp_err_t WebServerManager::handleStartConfigAP(httpd_req_t *req) {
       .toStringUnformatted();
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   vTaskDelay(pdMS_TO_TICKS(1000));
-  std::jthread j([](){
-    homeSpan.processSerialCommand("A");
-  });
-  j.detach();
+  auto run = [](void* p){ homeSpan.processSerialCommand("A"); vTaskDelete(nullptr); };
+  xTaskCreate(run, "hs_cmd", 4096, NULL, 5, nullptr);
   return ESP_OK;
 }
 
@@ -1425,6 +1465,95 @@ struct WifiSaveParams {
     bool hasSetupCode;
     std::string cleaned_body_str;
 };
+
+struct EthSaveParams {
+    httpd_req_t* req;
+    WebServerManager* instance;
+    std::string setupCode;
+    bool hasSetupCode;
+    std::string cleaned_body_str;
+};
+
+static constexpr int ETH_IP_WAIT_MS = 3000;
+
+/**
+ * @brief Persist the captive-portal submission, start the ethernet driver, and
+ *        report whether it came up.
+ *
+ * Runs off the HTTPD task (the request is completed asynchronously). The
+ * ETH_GOT_IP subscription is registered before the driver starts so the event
+ * cannot be missed. Outcomes:
+ * - driver failed to start -> 400, error message; the portal lets the user fix
+ *   the ethernet settings and resubmit.
+ * - driver started + IP within ETH_IP_WAIT_MS -> success with the real IP.
+ * - driver started, no IP -> success with 0.0.0.0 and an explanatory message;
+ *   the device reports 0.0.0.0 until the link/DHCP comes up after reboot.
+ */
+void WebServerManager::captivePortalEthSaveTask(void *pvParameters) {
+  EthSaveParams *params = static_cast<EthSaveParams *>(pvParameters);
+
+  if (params->hasSetupCode) {
+    homeSpan.setPairingCode(params->setupCode.c_str(), false);
+  }
+
+  params->instance->m_configManager.updateFromJson<espConfig::misc_config_t>(
+      params->cleaned_body_str);
+  params->instance->m_configManager.saveConfig<espConfig::misc_config_t>();
+
+  EventGroupHandle_t ethEvents = xEventGroupCreate();
+  auto gotIpSub = AppEventLoop::subscribe(ETH_APP_EVENT, ETH_GOT_IP,
+      [ethEvents](const uint8_t* data, size_t size){
+        if (ethEvents) xEventGroupSetBits(ethEvents, BIT0);
+      });
+
+  const auto miscConfig =
+      params->instance->m_configManager.getConfig<espConfig::misc_config_t>();
+  const bool driverStarted = EthernetDriver::start(miscConfig);
+
+  bool gotIp = false;
+  std::string ipAddr = "0.0.0.0";
+  if (driverStarted) {
+    if (ethEvents && gotIpSub.is_valid()) {
+      gotIp = (xEventGroupWaitBits(ethEvents, BIT0, pdFALSE, pdFALSE,
+                                   pdMS_TO_TICKS(ETH_IP_WAIT_MS)) & BIT0) != 0;
+    }
+    if (gotIp) {
+      ipAddr = ETH.localIP().toString().c_str();
+    }
+  }
+
+  if (gotIpSub.is_valid()) gotIpSub.reset();
+  if (ethEvents) vEventGroupDelete(ethEvents);
+
+  httpd_resp_set_type(params->req, "application/json");
+  JsonBuilder res = JsonBuilder::object();
+  std::string message;
+  if (!driverStarted) {
+    httpd_resp_set_status(params->req, "400 Bad Request");
+    res.addBool("success", false);
+    message = "Ethernet driver failed to start. Please check your Ethernet "
+              "module settings and try again.";
+    res.addString("error", message.c_str());
+  } else {
+    res.addBool("success", true);
+    if (gotIp) {
+      message = "Configuration saved. Device will now reboot.";
+    } else {
+      message = "Configuration saved. The Ethernet driver started, but no IP "
+                "address was assigned within 3 seconds. Device will now reboot.";
+    }
+    res.withObject("data", [&](JsonBuilder &data) {
+      data.addString("ip_addr", ipAddr.c_str());
+    });
+    res.addString("message", message.c_str());
+  }
+
+  std::string response = res.toStringUnformatted();
+  httpd_resp_send(params->req, response.c_str(), HTTPD_RESP_USE_STRLEN);
+  httpd_req_async_handler_complete(params->req);
+  delete params;
+  vTaskDelete(NULL);
+}
 
 void WebServerManager::captivePortalSaveTask(void *pvParameters) {
   WifiSaveParams *params = static_cast<WifiSaveParams *>(pvParameters);
@@ -1636,12 +1765,35 @@ BaseType_t task;
     return ESP_OK;
   }
 
-  if (hasSetupCode) {
-    homeSpan.setPairingCode(setupCode.c_str(), false);
-  }
+  if (ethernetEnabled) {
+    httpd_req_t* reqCopy = nullptr;
+    if (httpd_req_async_handler_begin(req, &reqCopy) != ESP_OK) {
+      return sendJsonError(req, "Failed to start save operation");
+    }
 
-  instance->m_configManager.updateFromJson<espConfig::misc_config_t>(cleaned_body_str);
-  instance->m_configManager.saveConfig<espConfig::misc_config_t>();
+    EthSaveParams* params = new EthSaveParams{
+      .req = reqCopy,
+      .instance = instance,
+      .setupCode = setupCode,
+      .hasSetupCode = hasSetupCode,
+      .cleaned_body_str = cleaned_body_str
+    };
+
+    BaseType_t task;
+#ifndef CONFIG_FREERTOS_UNICORE
+    task = xTaskCreatePinnedToCore(captivePortalEthSaveTask, "eth_save_task", 8192, params, 5, nullptr, 1);
+#else
+    task = xTaskCreate(captivePortalEthSaveTask, "eth_save_task", 8192, params, 5, nullptr);
+#endif
+    if (task != pdPASS) {
+      ESP_LOGE(TAG, "Failed to create Ethernet save task");
+      delete params;
+      httpd_req_async_handler_complete(reqCopy);
+      return sendJsonError(req, "Failed to create save task");
+    }
+
+    return ESP_OK;
+  }
 
   httpd_resp_set_type(req, "application/json");
   std::string response = JsonBuilder::object()
@@ -1770,14 +1922,12 @@ esp_err_t WebServerManager::handleWebSocket(httpd_req_t *req) {
     return ESP_FAIL;
 
   if (req->method == HTTP_GET) {
-    char *sessionId = new char[65];
-    size_t sessionIdLen = 65;
+    char sessionId[65] = {};
+    size_t sessionIdLen = sizeof(sessionId);
     esp_err_t err = httpd_req_get_cookie_val(req, "sessionId", sessionId, &sessionIdLen);
     if(!instance->basicAuth(req) && (err != ESP_OK || strncmp(sessionId, instance->m_sessionId.c_str(), sessionIdLen) != 0)){
-      delete[] sessionId;
       return sendAuthFailure(req);
     }
-    delete[] sessionId;
 
     // Handshake check succeeded. Returning ESP_OK completes the handshake.
     // The server will invoke WebServerManager::ws_post_handshake_cb immediately after.
@@ -1873,7 +2023,7 @@ void WebServerManager::removeWebSocketClient(int fd) {
 }
 
 void WebServerManager::setWSBackLogSize(const uint16_t size){
-  wsBacklogSize = size;
+  wsBacklogSize = size > kMaxBacklogFrames ? kMaxBacklogFrames : size;
 }
 
 void WebServerManager::broadcastWs(const uint8_t *payload, size_t len,
@@ -1886,19 +2036,32 @@ void WebServerManager::broadcastWs(const uint8_t *payload, size_t len,
       fds.push_back(c->fd);
   }
   if (fds.empty() && wsBacklogSize > 0) {
-    if(m_wsBroadcastBuffer.size() >= wsBacklogSize){
+    if (len > kMaxBacklogBytes) {
+      return;
+    }
+    std::scoped_lock lock(m_wsBroadcastMutex);
+    while (!m_wsBroadcastBuffer.empty() &&
+           (m_wsBroadcastBuffer.size() >= wsBacklogSize ||
+            m_wsBroadcastBytes + len > kMaxBacklogBytes)) {
+      m_wsBroadcastBytes -= m_wsBroadcastBuffer.front().size();
       m_wsBroadcastBuffer.pop_front();
     }
+    m_wsBroadcastBytes += len;
     m_wsBroadcastBuffer.emplace_back(payload, payload + len);
     return;
   }
+  std::shared_ptr<std::vector<uint8_t>> shared;
+  if (len > WsFrame::INLINE_SIZE) {
+    shared = std::make_shared<std::vector<uint8_t>>(payload, payload + len);
+  }
   for (int fd : fds){
-    queue_ws_frame(fd, payload, len, type);
+    queue_ws_frame(fd, payload, len, type, shared);
   }
 }
 
 void WebServerManager::queue_ws_frame(int fd, const uint8_t *payload,
-                                      size_t len, httpd_ws_type_t type) {
+                                      size_t len, httpd_ws_type_t type,
+                                      const std::shared_ptr<std::vector<uint8_t>>& shared) {
   WsFrame *frame = new WsFrame;
   if (!frame)
     return;
@@ -1909,19 +2072,18 @@ void WebServerManager::queue_ws_frame(int fd, const uint8_t *payload,
   if (len <= WsFrame::INLINE_SIZE) {
     memcpy(frame->inlinePayload, payload, len);
     frame->payload = frame->inlinePayload;
+  } else if (shared) {
+    frame->payload = shared->data();
+    frame->sharedData = std::move(shared);
   } else {
-    frame->payload = new uint8_t[len];
-    memcpy(frame->payload, payload, len);
+    frame->sharedData = std::make_shared<std::vector<uint8_t>>(payload, payload + len);
+    frame->payload = frame->sharedData->data();
   }
 
-  // Non-blocking on purpose. Log lines reach here from the NFC task, in the
-  // middle of a HomeKey exchange; the previous 100 ms wait meant that a slow
-  // or stalled WebSocket client could park that task between two APDUs and
-  // let the phone's transaction time out. A dropped debug line is cheaper
-  // than a door that does not open.
+  // Never block the caller (this runs on the log sink task): drop and count
+  // instead. A blocked enqueue here would stall all log dispatch.
   if (xQueueSend(m_wsQueue, &frame, 0) != pdTRUE) {
-    if (frame->payload != frame->inlinePayload)
-      delete[] frame->payload;
+    m_wsFrameDropped.fetch_add(1, std::memory_order_relaxed);
     delete frame;
   }
 }
@@ -1931,11 +2093,23 @@ void WebServerManager::ws_send_task(void *arg) {
   WsFrame *raw_frame = nullptr;
 
   while (true) {
-    if (xQueueReceive(instance->m_wsQueue, &raw_frame, portMAX_DELAY) ==
+    if (xQueueReceive(instance->m_wsQueue, &raw_frame, portMAX_DELAY) !=
         pdPASS) {
-      if (!raw_frame)
-        continue;
+      continue;
+    }
+    if (!raw_frame)
+      continue;
 
+    if (raw_frame->fd == -1) {
+      delete raw_frame;
+      xTaskNotifyGive(instance->m_wsTaskHandle);
+      vTaskDelete(NULL);
+      return;
+    }
+
+    // Drain everything already queued before waiting again so a burst of
+    // frames costs one wake-up instead of one per frame.
+    do {
       WsFramePtr frame(raw_frame);
 
       // Hold off while a tap is being exchanged with a phone. Sending here
@@ -1963,7 +2137,7 @@ void WebServerManager::ws_send_task(void *arg) {
         ws_pkt.fragmented = false;
         ws_pkt.type = frame->type;
         ws_pkt.len = frame->len;
-        ws_pkt.payload = frame->payload;
+        ws_pkt.payload = const_cast<uint8_t*>(frame->payload);
 
         esp_err_t send_ret = httpd_ws_send_frame_async(instance->m_server, target_fd, &ws_pkt);
         if (send_ret != ESP_OK) {
@@ -1977,7 +2151,8 @@ void WebServerManager::ws_send_task(void *arg) {
           }
         }
       }
-    }
+    } while (xQueueReceive(instance->m_wsQueue, &raw_frame, 0) == pdPASS &&
+             raw_frame != nullptr && raw_frame->fd != -1);
   }
 }
 
@@ -2024,7 +2199,7 @@ esp_err_t WebServerManager::handleWebSocketMessage(httpd_req_t *req, const std::
   } else if (msg_type == "set_backlog_max_size") {
     cJSON *item = cJSON_GetObjectItem(json.get(), "data");
     if(item && cJSON_IsNumber(item)) {
-      if(item->valueint >= 0 && item->valueint <= 65535){
+      if(item->valueint >= 0 && item->valueint <= kMaxBacklogFrames){
         wsBacklogSize = item->valueint;
         m_configManager.setBacklogMaxSize(item->valueint);
       } else ESP_LOGE(TAG, "Number outside of range for 'set_backlog_max_size'");
@@ -2056,6 +2231,7 @@ std::string WebServerManager::getDeviceMetrics() {
   status.addNumber("nfc_reader_type", m_configManager.getConfig<espConfig::misc_config_t>().nfcReaderType);
   status.addBool("mqtt_connected", m_mqttManager ? m_mqttManager->isConnected() : false);
   status.addNumber("mqtt_error_code", m_mqttManager ? static_cast<uint8_t>(m_mqttManager->getLastErrorCode()) : 0);
+  status.addNumber("ws_frames_dropped", static_cast<uint64_t>(getWsFrameDropCount()));
   if (m_mqttManager && !m_mqttManager->getLastErrorMessage().empty()) {
     status.addString("mqtt_error_message", m_mqttManager->getLastErrorMessage().c_str());
   }
@@ -2079,6 +2255,12 @@ std::string WebServerManager::getDeviceInfo() {
 
 void WebServerManager::statusTimerCallback(void *arg) {
   WebServerManager *instance = static_cast<WebServerManager *>(arg);
+  const uint64_t dropped = instance->getWsFrameDropCount();
+  if (dropped > instance->m_lastReportedWsFrameDropped) {
+    ESP_LOGW(TAG, "Dropped %llu WebSocket frames (send queue full)",
+             dropped - instance->m_lastReportedWsFrameDropped);
+    instance->m_lastReportedWsFrameDropped = dropped;
+  }
   auto metrics = instance->getDeviceMetrics();
   instance->broadcastWs((const uint8_t *)(metrics.c_str()), metrics.size(),
                         HTTPD_WS_TYPE_TEXT);
@@ -2123,13 +2305,23 @@ esp_err_t WebServerManager::handleOTAUpload(httpd_req_t *req) {
     return ESP_OK;
   }
   auto fs_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "spiffs");
-  if (uploadType == OTAUploadType::LITTLEFS && req->content_len > fs_part->size) {
-    ESP_LOGE(TAG, "OTA size %zu > max %zu", req->content_len, fs_part->size);
-    instance->m_otaInProgress = false;
-    httpd_resp_set_status(req, "413 Payload Too Large");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"LittleFS too large\"}");
-    return ESP_OK;
+  if (uploadType == OTAUploadType::LITTLEFS) {
+    if (!fs_part) {
+      ESP_LOGE(TAG, "No LittleFS (spiffs) partition found");
+      instance->m_otaInProgress = false;
+      httpd_resp_set_status(req, "500 Internal Server Error");
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"No LittleFS partition\"}");
+      return ESP_OK;
+    }
+    if (req->content_len > fs_part->size) {
+      ESP_LOGE(TAG, "OTA size %zu > max %zu", req->content_len, fs_part->size);
+      instance->m_otaInProgress = false;
+      httpd_resp_set_status(req, "413 Payload Too Large");
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"LittleFS too large\"}");
+      return ESP_OK;
+    }
   }
 
   bool skipReboot = false;

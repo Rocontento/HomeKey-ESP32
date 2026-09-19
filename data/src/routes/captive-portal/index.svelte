@@ -42,6 +42,7 @@
 	let showNetworkList = $state(false);
 	let activeTab = $state<'wifi' | 'hardware' | 'network'>('wifi');
 	let acquiredIP = $state("");
+	let saveMessage = $state("");
 
 	// Derived values for NFC/Ethernet presets
 	let nfcPresets : NfcGpioPinsPreset = $derived(route.meta.captivePortalData?.nfcPresets ?? { presets: [] });
@@ -86,8 +87,11 @@
 			const presetData = nfcPresets.presets[preset];
 			if (presetData) {
 				config.nfcGpioPins = [presetData.gpioPins[0], presetData.gpioPins[1], presetData.gpioPins[2], presetData.gpioPins[3]];
-				config.nfcIrqPin = presetData.irqPin;
-				config.nfcVenPin = presetData.venPin;
+				// IRQ/VEN are only meaningful for the PN7161 reader
+				if (presetData.type === 1) {
+					config.nfcIrqPin = presetData.irqPin;
+					config.nfcVenPin = presetData.venPin;
+				}
 			}
 		}
 	}
@@ -187,9 +191,16 @@
 		loading = true;
 		try {
 
-			const result = await saveCaptivePortalConfig(diff(config_initial, config));
+			let payload = diff(config_initial, config);
+			if (config.nfcReaderType !== 1) {
+				delete payload.nfcIrqPin;
+				delete payload.nfcVenPin;
+			}
+
+			const result = await saveCaptivePortalConfig(payload);
 			if (result.success) {
 				acquiredIP = result.data.ip_addr;
+				saveMessage = result.message;
 				saved = true;
 				// Trigger reboot after short delay
 				setTimeout(async () => {
@@ -214,9 +225,11 @@
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
 			</svg>
 			<div>
-				<span class="font-bold">WiFi connection successful!</span>
+				<span class="font-bold">{config.ethernetEnabled ? 'Ethernet' : 'WiFi'} connection successful!</span>
         <div class="font-bold">IP Address: {acquiredIP}</div>
-				<div class="text-sm">Configuration saved. The device is now rebooting and will connect to your network...</div>
+				{#if saveMessage}
+				<div class="text-sm">{saveMessage}</div>
+				{/if}
 			</div>
 		</div>
 		{:else}

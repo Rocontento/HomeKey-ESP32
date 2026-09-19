@@ -68,7 +68,7 @@ struct nfcGpioPins_t {
 #endif
 };
 
-static const std::array<nfcGpioPins_t,5> nfcGpioPinsPresets = {
+inline const std::array<nfcGpioPins_t,5> nfcGpioPinsPresets = {
     {
       // PN532
     {"Default", 0, {SS_PIN, SCK_PIN, MISO_PIN, MOSI_PIN}},
@@ -134,12 +134,16 @@ namespace espConfig
     std::map<std::string, uint8_t> customLockActions = { {"UNLOCK", C_UNLOCK}, {"LOCK", C_LOCK} };
   };
 
+  /* MQTT TLS material is stored in DER (binary) form to reduce resident heap;
+     PEM is accepted at upload time and converted by ConfigManager. The fields
+     are only resident in RAM while MQTT TLS is enabled. */
   struct mqtt_ssl_t {
     std::string caCert = MQTT_CA_CERT;
     std::string clientCert = MQTT_CLIENT_CERT;
     std::string clientKey = MQTT_CLIENT_KEY;
   };
 
+  /* HTTPS certs stay in PEM because esp_https_server consumes PEM directly. */
   struct https_certs_t {
     std::string serverCert = "";
     std::string privateKey = "";
@@ -158,7 +162,18 @@ namespace espConfig
 
   struct misc_config_t
   {
-    std::string deviceName = DEVICE_NAME;
+    misc_config_t() {
+      std::string name = DEVICE_NAME;
+      if (name.ends_with("{MAC}")) {
+        name.resize(name.size() - 5);
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_BT);
+        const std::string macStr = fmt::format("{:02X}{:02X}{:02X}{:02X}", mac[2], mac[3], mac[4], mac[5]);
+        name.append(macStr);
+      }
+      deviceName = name;
+    }
+    std::string deviceName;
     std::string otaPasswd = OTA_PWD;
     uint8_t hk_key_color = HOMEKEY_COLOR;
     std::string setupCode = SETUP_CODE;
@@ -187,6 +202,16 @@ namespace espConfig
     std::array<uint8_t, 7> ethSpiConfig = {ETH_SPI_CONF_SPI_FREQ_MHZ, ETH_SPI_CONF_PIN_CS, ETH_SPI_CONF_PIN_IRQ, ETH_SPI_CONF_PIN_RST, ETH_SPI_CONF_PIN_SCK, ETH_SPI_CONF_PIN_MISO, ETH_SPI_CONF_PIN_MOSI};
     bool overrideStrappingRestriction = false;
     std::string accessPointPassword = AP_PASSWORD;
+    bool keypadEnabled = KEYPAD_ENABLED;
+    uint8_t keypadLayout = KEYPAD_LAYOUT; // 0 = 5x3 with doorbell row, 1 = 4x4
+    std::array<uint8_t, 5> keypadRowPins = KEYPAD_OUTPUT_GPIOS;
+    std::array<uint8_t, 4> keypadColumnPins = KEYPAD_INPUT_GPIOS;
+    uint8_t keypadActiveLevel = KEYPAD_ACTIVE_LEVEL;
+    uint8_t keypadDebounceTicks = KEYPAD_DEBOUNCE_TICKS;
+    uint8_t keypadDoorbellKey = KEYPAD_DOORBELL_KEY; // 0 = layout default, 'A'-'D' on 4x4, 255 = disabled
+    uint8_t keypadMinCodeLength = KEYPAD_MIN_CODE_LENGTH;
+    uint8_t keypadMaxCodeLength = KEYPAD_MAX_CODE_LENGTH;
+    uint8_t keypadMaxCodes = KEYPAD_MAX_CODES;
   };
   struct actions_config_t {
     enum colorMap

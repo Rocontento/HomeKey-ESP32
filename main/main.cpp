@@ -97,8 +97,17 @@ bool initLogging(){
   esp_log_level_set("*", static_cast<esp_log_level_t>(logLevel));
   loggable::Sinker::instance().set_level(static_cast<loggable::LogLevel>(logLevel));
   loggable::espidf::LogHook::install(false, true);
-  Sinker::instance().add_sinker(std::make_shared<loggable::ConsoleLogSinker>());
-  Sinker::instance().add_sinker(std::make_shared<loggable::WebSocketLogSinker>(webServerManager));
+  SinkConfig console_cfg{};
+  console_cfg.delivery = SinkConfig::Delivery::Sync;
+  console_cfg.name = "console";
+  Sinker::instance().add_sinker(std::make_shared<loggable::ConsoleLogSinker>(), console_cfg);
+  SinkConfig ws_cfg{};
+  ws_cfg.delivery = SinkConfig::Delivery::Async;
+  ws_cfg.queue_capacity = 32;
+  ws_cfg.max_batch = 8;
+  ws_cfg.name = "log_ws";
+  ws_cfg.task.task_stack_size = 3072;
+  Sinker::instance().add_sinker(std::make_shared<loggable::WebSocketLogSinker>(webServerManager), ws_cfg);
   return true;
 }
 

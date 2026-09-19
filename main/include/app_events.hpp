@@ -31,3 +31,19 @@ ESP_EVENT_DECLARE_BASE(MQTT_EVENT);
 enum {
     MQTT_STATUS_CHANGED,
 };
+
+// ETH_EVENT is taken by esp_eth (esp_eth_com.h), hence the APP_ prefix.
+ESP_EVENT_DECLARE_BASE(ETH_APP_EVENT);
+enum {
+    ETH_STARTED,
+    ETH_GOT_IP,
+    ETH_LOST_IP,
+    ETH_DISCONNECTED,
+    ETH_STOPPED,
+};
+
+ESP_EVENT_DECLARE_BASE(KEYPAD_EVENT);
+enum {
+    KEYPAD_CODE_ENTERED,
+    KEYPAD_DOORBELL,
+};
