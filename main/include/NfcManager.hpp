@@ -11,6 +11,10 @@
 #include "app_event_loop.hpp"
 #include "NfcReader.hpp"
 #include "GPIOAllocator.hpp"
+#include "sdkconfig.h"
+#if CONFIG_PM_ENABLE
+#include "esp_pm.h"
+#endif
 
 class LockManager;
 class HardwareManager;
@@ -76,6 +80,14 @@ private:
 
     TaskHandle_t m_pollingTaskHandle;
     TaskHandle_t m_retryTaskHandle;
+
+#if CONFIG_PM_ENABLE
+    // Dynamic frequency scaling is on in this project's defaults, so the CPU
+    // and APB clocks are free to change between two APDUs of the same tap.
+    // Each switch re-locks a PLL, and that transient lands on the same rail
+    // the reader's carrier is drawing from. Pinned for the length of a tap.
+    esp_pm_lock_handle_t m_pmLock = nullptr;
+#endif
 
     // --- Post-transaction cooldown (polling task only) ---
     enum class TxnOutcome : uint8_t { None, Success, Failure };
