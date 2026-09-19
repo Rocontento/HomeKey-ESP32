@@ -187,14 +187,7 @@ NfcManager::NfcManager(NvsCredentialStore& readerDataManager,
   });
 }
 
-NfcManager::~NfcManager() {
-#if CONFIG_PM_ENABLE
-  if (m_pmLock) {
-    esp_pm_lock_delete(m_pmLock);
-    m_pmLock = nullptr;
-  }
-#endif
-}
+NfcManager::~NfcManager() = default;
 
 /**
  * @brief Initialize the selected NFC reader and start the NFC polling task.
@@ -237,15 +230,6 @@ bool NfcManager::begin() {
     	ESP_LOGE(TAG, "Unsupported NFC reader type: %u", m_nfcReaderType);
     	return false;
     }
-#if CONFIG_PM_ENABLE
-    if (!m_pmLock &&
-        esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "nfc_txn", &m_pmLock) != ESP_OK) {
-        // Not fatal: without it the tap still works, it just runs with DFS
-        // free to change the clocks underneath it.
-        ESP_LOGW(TAG, "Could not create the NFC power-management lock.");
-        m_pmLock = nullptr;
-    }
-#endif
     ESP_LOGI(TAG, "Auth precompute %s.", m_hkAuthPrecomputeEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "NFC fast polling: %s", m_nfcFastPollingEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "Starting NFC polling task...");
@@ -419,21 +403,17 @@ void NfcManager::handleTagPresence(const std::vector<uint8_t>& uid, const std::a
     auto startTime = std::chrono::high_resolution_clock::now();
 
     // Everything below is one continuous RF exchange with the phone. Ask the
-    // rest of the firmware to keep off the air until it is over (see
-    // RfQuietWindow) and pin the clocks so dynamic frequency scaling cannot
-    // re-lock a PLL between two APDUs. Both are released on every exit path.
+    // rest of the firmware to keep off the air until it is over.
+    //
+    // This used to also take an ESP_PM_CPU_FREQ_MAX lock here, to stop dynamic
+    // frequency scaling re-locking a PLL between two APDUs. That was a mistake
+    // on a board whose reader shares the ESP32's supply: acquiring it steps the
+    // CPU up to 240 MHz at this exact point, which is immediately before the
+    // first APDU goes out over RF, and field logs then showed the SELECT --
+    // thirteen bytes, and previously the one exchange that never failed --
+    // timing out. Trading a clock transient for a current step made things
+    // worse, so the clocks are left alone.
     RfQuietWindow::Scope quiet;
-#if CONFIG_PM_ENABLE
-    struct PmLockScope {
-        esp_pm_lock_handle_t h;
-        explicit PmLockScope(esp_pm_lock_handle_t lock) : h(lock) {
-            if (h) esp_pm_lock_acquire(h);
-        }
-        ~PmLockScope() { if (h) esp_pm_lock_release(h); }
-        PmLockScope(const PmLockScope&) = delete;
-        PmLockScope& operator=(const PmLockScope&) = delete;
-    } pmLock(m_pmLock);
-#endif
 
     const std::vector<uint8_t> selectAppletCmd = { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x08, 0x58, 0x01, 0x01, 0x00 };
 
@@ -482,7 +462,27 @@ void NfcManager::handleTagPresence(const std::vector<uint8_t>& uid, const std::a
 
         m_linkError = false;
         std::vector<uint8_t> response;
-        const bool ok = m_reader->exchangeApdu(selectAppletCmd, response, 500);
+        bool ok = m_reader->exchangeApdu(selectAppletCmd, response, 500);
+
+        // A SELECT that fails while the phone has just answered anticollision
+        // is usually not a broken link: it is card emulation that was activated
+        // before it finished arming the HomeKey applet off the ECP frame, so
+        // the applet is not there to answer yet. Re-sending SELECT is free and
+        // safe -- selection by AID is idempotent, unlike Auth0 -- and it keeps
+        // the activation, where the field-reset path below costs upwards of
+        // 600 ms and usually loses the phone before it can be reused.
+        if (!ok && isoDep) {
+            for (int i = 0; i < kSelectRetries && !ok; ++i) {
+                vTaskDelay(pdMS_TO_TICKS(kSelectRetryDelayMs));
+                ESP_LOGW(TAG, "SELECT failed, retrying on the same link (%d/%d)",
+                         i + 1, kSelectRetries);
+                ok = m_reader->exchangeApdu(selectAppletCmd, response, 500);
+            }
+            if (ok) {
+                ESP_LOGI(TAG, "SELECT recovered without re-activating the tag.");
+            }
+        }
+
         if (!ok) {
             // Reader-level failure (transport or PN532 error), the tag never
             // answered. Retry if we can; otherwise fall through to the generic
