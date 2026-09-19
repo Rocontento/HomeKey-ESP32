@@ -1,4 +1,5 @@
 #include "HardwareManager.hpp"
+#include "EthernetDriver.hpp"
 #include "fmt/ranges.h"
 #include "config.hpp"
 #include "esp_log.h"
@@ -14,9 +15,12 @@
 #include "LockManager.hpp"
 #include "ConfigManager.hpp"
 #include "ReaderDataManager.hpp"
+#include "AccessCodeManager.hpp"
+#include "KeypadManager.hpp"
 #include "esp_mac.h"
 #include "hal/spi_types.h"
 #include "utils.hpp"
+#include "SharedLed.hpp"
 
 const char* HomeKitLock::TAG = "HomeKitBridge";
 static HomeKitLock* s_instance = nullptr;
@@ -61,253 +65,80 @@ HomeKitLock::HomeKitLock(std::function<void(int)> &conn_cb, LockManager& lockMan
               EventValueChanged s = alpaca::deserialize<EventValueChanged>(hk_event.data, ec);
               if(ec) { ESP_LOGE(TAG, "Failed to deserialize EventValueChanged event: %s", ec.message().c_str()); return; }
               if(s.name == "btrLevel") {
-                  updateBatteryStatus(s.newValue, m_statusLowBattery->getVal());
+                  if (m_statusLowBattery) updateBatteryStatus(s.newValue, m_statusLowBattery->getVal());
               } else if(s.name == "btrLowThreshold"){
-                  updateBatteryStatus(m_batteryLevel->getVal(), s.newValue);
+                  if (m_batteryLevel) updateBatteryStatus(m_batteryLevel->getVal(), s.newValue);
               }
           }
           break;
-          default:
-          break;
+      default:
+      break;
       }
   });
 }
 
 /**
- * @brief Handle Ethernet events, update hostname at start, and log state changes.
+ * @brief Construct the keypad/access-code sub-system for the lock.
  *
- * This event handler responds to Arduino Ethernet events: on start it retrieves
- * the MAC address, constructs and sets a hostname derived from the MAC; on
- * connection, disconnection, IP acquisition/loss, and stop events it logs the
- * corresponding state change. For the GOT_IP event the network interface
- * descriptor from `info` is included in the log.
- *
- * @param event The Ethernet event identifier (arduino_event_id_t).
- * @param info  Event-specific data; used for logging the network interface
- *              descriptor when the event is ARDUINO_EVENT_ETH_GOT_IP.
+ * When the keypad feature is enabled in configuration, loads stored access codes,
+ * initializes the matrix keypad, and subscribes to keypad events so entered codes
+ * are validated against the stored access codes and, on a match, trigger an
+ * unlock through the internal lock-state event.
  */
-void HomeKitLock::ethEventHandler(arduino_event_id_t event, arduino_event_info_t info) {
-  uint8_t mac[6] = { 0, 0, 0, 0, 0, 0 };
-  std::string macStr;
-  switch (event) {
-    case ARDUINO_EVENT_ETH_START:
-      ESP_LOGI(TAG,"ETH Started");
-      ETH.macAddress(mac);
-      macStr = fmt::format("ESP32_{:02X}{:02X}{:02X}", mac[0], mac[1], mac[2]);
-      ETH.setHostname(macStr.c_str());
-      break;
-    case ARDUINO_EVENT_ETH_CONNECTED: ESP_LOGI(TAG,"ETH Connected"); break;
-    case ARDUINO_EVENT_ETH_GOT_IP:    ESP_LOGI(TAG,"ETH Got IP: '%s'", esp_netif_get_desc(info.got_ip.esp_netif)); break;
-    case ARDUINO_EVENT_ETH_LOST_IP:
-      ESP_LOGI(TAG,"ETH Lost IP");
-      break;
-    case ARDUINO_EVENT_ETH_DISCONNECTED:
-      ESP_LOGI(TAG,"ETH Disconnected");
-      break;
-    case ARDUINO_EVENT_ETH_STOP:
-      ESP_LOGI(TAG,"ETH Stopped");
-      break;
-    default: break;
-  }
+void HomeKitLock::initKeypad() {
+    const auto& miscConfig = m_configManager.getConfig<espConfig::misc_config_t>();
+    if (!miscConfig.keypadEnabled) {
+        return;
+    }
+    m_accessCodeManager = std::make_unique<AccessCodeManager>(miscConfig.keypadMinCodeLength,
+                                                              miscConfig.keypadMaxCodeLength,
+                                                              miscConfig.keypadMaxCodes);
+    m_accessCodeManager->init();
+    m_keypad = std::make_unique<KeypadManager>();
+    m_keypad_event = AppEventLoop::subscribe(KEYPAD_EVENT, KEYPAD_CODE_ENTERED, [&](const uint8_t* data, size_t size){
+        if(size == 0 || data == nullptr) return;
+        std::span<const uint8_t> payload(data, size);
+        std::error_code ec;
+        EventKeypadCode s = alpaca::deserialize<EventKeypadCode>(payload, ec);
+        if(ec) { ESP_LOGE(TAG, "Failed to deserialize keypad event: %s", ec.message().c_str()); return; }
+        if (m_accessCodeManager->validateCode(s.code)) {
+            ESP_LOGI(TAG, "Access code accepted, unlocking.");
+            EventLockState ls{
+              .currentState = static_cast<uint8_t>(m_lockManager.getTargetState()),
+              .targetState = static_cast<uint8_t>(LockManager::lockStates::UNLOCKED),
+              .source = LockManager::HOMEKIT
+            };
+            std::vector<uint8_t> d;
+            alpaca::serialize(ls, d);
+            AppEventLoop::publish(LOCK_EVENT, LOCK_TARGET_STATE_CHANGED, d.data(), d.size());
+        }
+    });
+    m_keypad->registerCodeEnteredCallback([](const std::string& code){
+        EventKeypadCode s{.code = code};
+        std::vector<uint8_t> d;
+        alpaca::serialize(s, d);
+        AppEventLoop::publish(KEYPAD_EVENT, KEYPAD_CODE_ENTERED, d.data(), d.size());
+    });
+    m_keypad->registerDoorbellCallback([](){
+        AppEventLoop::publish(KEYPAD_EVENT, KEYPAD_DOORBELL, nullptr, 0);
+    });
+    if (!m_keypad->begin(miscConfig)) {
+        ESP_LOGE(TAG, "Failed to initialize keypad hardware.");
+        m_keypad.reset();
+        m_accessCodeManager.reset();
+    }
 }
 
 /**
  * @brief Initializes the Ethernet subsystem according to saved configuration.
  *
- * Initializes and starts Ethernet if enabled in configuration, registers the Ethernet
- * event handler, and applies either a selected board preset or a custom pin/PHY
- * configuration. If Ethernet is disabled, or if the active preset/index or custom
- * PHY is invalid or unsupported, the function logs an error and exits without
- * initializing Ethernet.
- *
- * Observable behaviours:
- * - Registers ethEventHandler with Network for Ethernet events when initialization begins.
- * - Uses a preset configuration when `ethActivePreset` is a valid index; otherwise
- *   uses custom configuration from `miscConfig`.
- * - If a configuration requires a built-in EMAC but the build does not include
- *   CONFIG_ETH_USE_ESP32_EMAC, logs an error and does not initialize Ethernet.
+ * Delegates to EthernetDriver::start(), which owns the ethernet event handler,
+ * GPIO allocation, and driver bring-up. See EthernetDriver.cpp for the
+ * observable behaviours.
  */
 void HomeKitLock::initializeETH() {
   const auto& miscConfig = m_configManager.getConfig<espConfig::misc_config_t>();
-
-  if (!miscConfig.ethernetEnabled) {
-    ESP_LOGI(TAG, "Ethernet is disabled. HomeSpan will manage Wi-Fi.");
-    return;
-  }
-
-  ESP_LOGI(TAG, "Ethernet is enabled. Initializing...");
-
-  spi_host_device_t spiHost = SPI2_HOST;
-  if (miscConfig.ethSpiBus < static_cast<unsigned char>(SPI_HOST_MAX)) {
-    spiHost = static_cast<spi_host_device_t>(miscConfig.ethSpiBus);
-  } else {
-    ESP_LOGW(TAG, "ethSpiBus out of range (%u). Defaulting to SPI2_HOST.", static_cast<unsigned>(miscConfig.ethSpiBus));
-  }
-
-  uint8_t eth_sck = 255;
-  uint8_t eth_miso = 255;
-  uint8_t eth_mosi = 255;
-  uint8_t eth_cs = 255;
-  uint8_t eth_irq = 255;
-  uint8_t eth_rst = 255;
-  bool is_spi_ethernet = false;
-  eth_phy_type_t phy_type;
-
-  if (miscConfig.ethActivePreset != 255) {
-    if (miscConfig.ethActivePreset >= eth_config_ns::boardPresets.size()) {
-      ESP_LOGE(TAG, "Invalid ethActivePreset index (%d). Not initializing Ethernet.", miscConfig.ethActivePreset);
-      return;
-    }
-    const eth_board_presets_t& ethPreset = eth_config_ns::boardPresets[miscConfig.ethActivePreset];
-    is_spi_ethernet = !ethPreset.ethChip.emac;
-    phy_type = ethPreset.ethChip.phy_type;
-    if (is_spi_ethernet) {
-      eth_sck = ethPreset.spi_conf.pin_sck;
-      eth_miso = ethPreset.spi_conf.pin_miso;
-      eth_mosi = ethPreset.spi_conf.pin_mosi;
-      eth_cs = ethPreset.spi_conf.pin_cs;
-      eth_irq = ethPreset.spi_conf.pin_irq;
-      eth_rst = ethPreset.spi_conf.pin_rst;
-    }
-  } else {
-    phy_type = static_cast<eth_phy_type_t>(miscConfig.ethPhyType);
-    if (eth_config_ns::supportedChips.count(phy_type) == 0) {
-      ESP_LOGE(TAG, "Custom phy_type (%d) is not supported.", miscConfig.ethPhyType);
-      return;
-    }
-    const eth_chip_desc_t& chipType = eth_config_ns::supportedChips.at(phy_type);
-    is_spi_ethernet = !chipType.emac;
-    if (is_spi_ethernet) {
-      eth_sck = miscConfig.ethSpiConfig[4];
-      eth_miso = miscConfig.ethSpiConfig[5];
-      eth_mosi = miscConfig.ethSpiConfig[6];
-      eth_cs = miscConfig.ethSpiConfig[1];
-      eth_irq = miscConfig.ethSpiConfig[2];
-      eth_rst = miscConfig.ethSpiConfig[3];
-    }
-  }
-
-  if (is_spi_ethernet) {
-    static std::vector<GPIOAllocator::GPIOLease> eth_leases;
-    eth_leases.clear();
-    if (eth_sck == 255 || eth_miso == 255 || eth_mosi == 255 || eth_cs == 255) {
-      ESP_LOGE(TAG, "One or more required GPIO Pins for SPI Ethernet are not "
-                    "defined, cannot setup Ethernet.");
-      return;
-    }
-    auto owner_sck = GPIOAllocator::instance().owner_of(eth_sck);
-    auto owner_miso = GPIOAllocator::instance().owner_of(eth_miso);
-    auto owner_mosi = GPIOAllocator::instance().owner_of(eth_mosi);
-
-    bool sck_shared_with_nfc = (owner_sck == "SPI2_SCK");
-    bool miso_shared_with_nfc = (owner_miso == "SPI2_MISO");
-    bool mosi_shared_with_nfc = (owner_mosi == "SPI2_MOSI");
-
-    if (spiHost == SPI2_HOST) {
-      if (!sck_shared_with_nfc || !miso_shared_with_nfc || !mosi_shared_with_nfc) {
-        ESP_LOGE(TAG, "Ethernet conflict: When using SPI2, Ethernet must share the exact same SCK/MISO/MOSI pins as NFC.");
-        ESP_LOGE(TAG, "Current owners - SCK (%d): %s, MISO (%d): %s, MOSI (%d): %s",
-                 eth_sck, owner_sck.value_or("free").data(),
-                 eth_miso, owner_miso.value_or("free").data(),
-                 eth_mosi, owner_mosi.value_or("free").data());
-        return; 
-      }
-      ESP_LOGI(TAG, "Ethernet is verified to share the SPI2 bus pins with the NFC module.");
-    } else {
-      if (owner_sck.has_value() || owner_miso.has_value() || owner_mosi.has_value()) {
-        ESP_LOGE(TAG, "Ethernet conflict: One or more SPI pins for Ethernet are already allocated.");
-        ESP_LOGE(TAG, "Current owners - SCK (%d): %s, MISO (%d): %s, MOSI (%d): %s",
-                 eth_sck, owner_sck.value_or("free").data(),
-                 eth_miso, owner_miso.value_or("free").data(),
-                 eth_mosi, owner_mosi.value_or("free").data());
-        return; 
-      }
-
-#if SOC_SPI_PERIPH_NUM > 2
-    auto lease_sck = GPIOAllocator::instance().acquire(gpio_num_t(eth_sck), GPIO_MODE_DISABLE, spiHost == SPI2_HOST ? "SPI2_SCK" : spiHost == SPI3_HOST ? "SPI3_SCK" : "ETH_SCK");
-    auto lease_miso = GPIOAllocator::instance().acquire(gpio_num_t(eth_miso), GPIO_MODE_DISABLE, spiHost == SPI2_HOST ? "SPI2_MISO" : spiHost == SPI3_HOST ? "SPI3_MISO" : "ETH_MISO");
-    auto lease_mosi = GPIOAllocator::instance().acquire(gpio_num_t(eth_mosi), GPIO_MODE_DISABLE, spiHost == SPI2_HOST ? "SPI2_MOSI" : spiHost == SPI3_HOST ? "SPI3_MOSI" : "ETH_MOSI");
-#else
-    auto lease_sck = GPIOAllocator::instance().acquire(gpio_num_t(eth_sck), GPIO_MODE_DISABLE, "SPI2_SCK");
-    auto lease_miso = GPIOAllocator::instance().acquire(gpio_num_t(eth_miso), GPIO_MODE_DISABLE, "SPI2_MISO");
-    auto lease_mosi = GPIOAllocator::instance().acquire(gpio_num_t(eth_mosi), GPIO_MODE_DISABLE, "SPI2_MOSI");
-#endif
-      if (lease_sck.has_value() && lease_miso.has_value() && lease_mosi.has_value()) {
-        eth_leases.push_back(std::move(lease_sck.value()));
-        eth_leases.push_back(std::move(lease_miso.value()));
-        eth_leases.push_back(std::move(lease_mosi.value()));
-        ESP_LOGI(TAG, "Allocated Ethernet SPI Host pins (SCK: %d, MISO: %d, MOSI: %d)", eth_sck, eth_miso, eth_mosi);
-      } else {
-        ESP_LOGE(TAG, "Failed to allocate Ethernet SPI Host pins.");
-        eth_leases.clear();
-        return;
-      }
-    }
-
-    auto check_and_allocate = [&](uint8_t pin, const std::string& tag_name, gpio_mode_t mode) -> bool {
-      if (pin == 255) return true;
-      if (auto owner = GPIOAllocator::instance().owner_of(pin); owner && owner != "STRAPPING") {
-        ESP_LOGE(TAG, "Pin %d for %s is already allocated to '%s'.", pin, tag_name.c_str(), owner.value().data());
-        return false;
-      }
-      auto lease = GPIOAllocator::instance().acquire(gpio_num_t(pin), mode, tag_name);
-      if (lease.has_value()) {
-        eth_leases.push_back(std::move(lease.value()));
-        return true;
-      } else {
-        ESP_LOGE(TAG, "Failed to allocate Pin %d for %s.", pin, tag_name.c_str());
-        return false;
-      }
-    };
-
-    if (!check_and_allocate(eth_cs, "ETH_SPI_CS", GPIO_MODE_DISABLE) ||
-        !check_and_allocate(eth_irq, "ETH_SPI_IRQ", GPIO_MODE_INPUT) ||
-        !check_and_allocate(eth_rst, "ETH_SPI_RST", GPIO_MODE_OUTPUT)) {
-      eth_leases.clear();
-      return;
-    }
-  }
-
-  Network.onEvent(ethEventHandler);
-
-  // --- Preset-based Configuration ---
-  if (miscConfig.ethActivePreset != 255) {
-    const eth_board_presets_t& ethPreset = eth_config_ns::boardPresets[miscConfig.ethActivePreset];
-    ESP_LOGI(TAG, "Initializing with preset: %s", ethPreset.name.c_str());
-
-    if (!ethPreset.ethChip.emac) {
-      const auto& spiConf = ethPreset.spi_conf;
-      ETH.begin(ethPreset.ethChip.phy_type, 1, spiConf.pin_cs, spiConf.pin_irq, spiConf.pin_rst,
-                spiHost, spiConf.pin_sck, spiConf.pin_miso, spiConf.pin_mosi, spiConf.spi_freq_mhz);
-    } else {
-#if CONFIG_ETH_USE_ESP32_EMAC
-      const auto& rmiiConf = ethPreset.rmii_conf;
-      ETH.begin(ethPreset.ethChip.phy_type, rmiiConf.phy_addr, rmiiConf.pin_mcd, rmiiConf.pin_mdio,
-                rmiiConf.pin_power, rmiiConf.pin_rmii_clock);
-#else
-      ESP_LOGE(TAG, "Preset requires EMAC, but this board does not have a built-in Ethernet MAC.");
-#endif
-    }
-  }
-  // --- Custom Configuration ---
-  else {
-    ESP_LOGI(TAG, "Initializing with custom pin configuration.");
-    const eth_chip_desc_t& chipType = eth_config_ns::supportedChips.at(phy_type);
-
-    if (!chipType.emac) {
-      const auto& spiConf = miscConfig.ethSpiConfig;
-      ETH.begin(chipType.phy_type, 1, spiConf[1], spiConf[2], spiConf[3],
-                spiHost, spiConf[4], spiConf[5], spiConf[6], spiConf[0]);
-    } else {
-#if CONFIG_ETH_USE_ESP32_EMAC
-      const auto& rmiiConf = miscConfig.ethRmiiConfig;
-      ETH.begin(chipType.phy_type, rmiiConf[0], rmiiConf[1], rmiiConf[2], rmiiConf[3],
-                static_cast<eth_clock_mode_t>(rmiiConf[4]));
-#else
-      ESP_LOGE(TAG, "Custom config requires EMAC, but this board does not have a built-in Ethernet MAC.");
-#endif
-    }
-  }
+  EthernetDriver::start(miscConfig);
 }
 /**
  * @brief Initialize HomeSpan, expose lock-related accessories/services, and register runtime callbacks.
@@ -315,6 +146,7 @@ void HomeKitLock::initializeETH() {
  * Configures HomeSpan using settings from ConfigManager (pins, OTA password, port, host name suffix), initializes reader data handling, creates the lock accessory and its services/characteristics (including lock mechanism, management, NFC access, protocol/version, and optional physical battery service), installs developer debug commands, and registers controller and connection callbacks.
  */
 void HomeKitLock::begin() {
+    initKeypad();
     m_lock_state_changed = AppEventLoop::subscribe(LOCK_EVENT, LOCK_STATE_CHANGED, [&](const uint8_t* data, size_t size){
         if(size == 0 || data == nullptr) return;
         std::span<const uint8_t> payload(data, size);
@@ -329,19 +161,22 @@ void HomeKitLock::begin() {
     ESP_LOGI(TAG, "Starting HomeSpan setup...");
 
     if (miscConfig.controlPin != 255){
-      static auto hsControlPin = GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.controlPin), GPIO_MODE_DISABLE, "HS_CONTROL_PIN");
+      static auto hsControlPin = GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.controlPin), GPIO_MODE_DISABLE, GPIOAllocator::PinRole::GpioIn, GPIOAllocator::PinConsumer::HomeKit, "HS_CONTROL_PIN");
       if(hsControlPin.has_value())
         homeSpan.setControlPin(miscConfig.controlPin);
-      else 
+      else
         ESP_LOGW(TAG, "Could not acquire pin for the HomeSpan Control pin, error: %d", hsControlPin.error());
     }
     if (miscConfig.hsStatusPin != 255){
-      static auto hsStatusPin = GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.hsStatusPin), GPIO_MODE_DISABLE, "HS_STATUS_PIN");
-      if(hsStatusPin.has_value())
-        homeSpan.setStatusPin(miscConfig.hsStatusPin);
-      else 
+      static auto hsStatusPin = GPIOAllocator::instance().acquire(gpio_num_t(miscConfig.hsStatusPin), GPIO_MODE_OUTPUT, GPIOAllocator::PinRole::Led, GPIOAllocator::PinConsumer::HomeKit, "HS_STATUS_PIN");
+      if(hsStatusPin.has_value()) {
+        static SharedLed statusLed{std::move(hsStatusPin.value())};
+        statusLed.set_restore_hook([]() {homeSpan.refreshStatusDevice();});
+        homeSpan.setStatusDevice(&statusLed);
+      } else {
         ESP_LOGW(TAG, "Could not acquire pin for the HomeSpan Status pin, error: %d", hsStatusPin.error());
-    } 
+      }
+    }
     #ifdef CONFIG_INIT_ARDU_SERIAL_LOGGING
     ESP_LOGI(TAG, "Press any key within 1 second for console access.");
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -376,6 +211,14 @@ void HomeKitLock::begin() {
       new LockManagementService();
       new LockMechanismService(*this, m_lockManager);
       new NFCAccessService(m_readerDataManager);
+      if(miscConfig.keypadEnabled && m_accessCodeManager) {
+          new AccessCodeService(*m_accessCodeManager);
+          m_doorbell = new DoorbellService();
+          m_doorbell_event = AppEventLoop::subscribe(KEYPAD_EVENT, KEYPAD_DOORBELL, [&](const uint8_t* data, size_t size){
+              ESP_LOGI(TAG, "Doorbell pressed, notifying HomeKit controllers.");
+              m_doorbell->m_switchEvent->setVal(Characteristic::ProgrammableSwitchEvent::SINGLE_PRESS);
+          });
+      }
       if(miscConfig.proxBatEnabled) {
           new PhysicalLockBatteryService(*this);
       }
@@ -588,6 +431,9 @@ void HomeKitLock::controllerCallback() {
     if (HAPClient::nAdminControllers() == 0) {
         ESP_LOGW(TAG, "Last controller unpaired. Wiping HomeKey data.");
         m_readerDataManager.deleteAllReaderData();
+        if (m_accessCodeManager) {
+            m_accessCodeManager->purge_codes();
+        }
         return;
     }
 

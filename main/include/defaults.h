@@ -20,9 +20,9 @@
 
 //MQTT SSL/TLS Settings
 #define MQTT_USE_SSL false // Enable/disable SSL/TLS for MQTT connection
-#define MQTT_CA_CERT "" // CA certificate for server validation (PEM format)
-#define MQTT_CLIENT_CERT "" // Client certificate for mutual authentication (PEM format)
-#define MQTT_CLIENT_KEY "" // Client private key for mutual authentication (PEM format)
+#define MQTT_CA_CERT "" // CA certificate for server validation (stored as DER after upload; PEM accepted at upload)
+#define MQTT_CLIENT_CERT "" // Client certificate for mutual authentication (stored as DER after upload; PEM accepted at upload)
+#define MQTT_CLIENT_KEY "" // Client private key for mutual authentication (stored as DER after upload; PEM accepted at upload)
 #define MQTT_ALLOW_INSECURE false // Allow connections without proper certificate validation (INSECURE - use only for testing)
 
 // MQTT Topics
@@ -51,7 +51,7 @@
 #define HOMEKEY_COLOR TAN
 #define SETUP_CODE "46637726"  // HomeKit Setup Code (only for reference, has to be changed during WiFi Configuration or from WebUI)
 #define OTA_PWD "homespan-ota" //custom password for ota
-#define DEVICE_NAME "HK" //Device name
+#define DEVICE_NAME "HK-{MAC}" //Device name
 #define HOMEKEY_ALWAYS_UNLOCK 0 // Flag indicating if a successful Homekey authentication should always set and publish the unlock state
 #define HOMEKEY_ALWAYS_LOCK 0  // Flag indicating if a successful Homekey authentication should always set and publish the lock state
 #ifdef CONFIG_IDF_TARGET_ESP32
@@ -134,3 +134,15 @@
 #define WEB_AUTH_USERNAME "admin"
 #define WEB_AUTH_PASSWORD "password"
 #define NFC_ACTIVE_PRESET 255 // NFC preset index (255 for custom pins)
+
+// Keypad
+#define KEYPAD_ENABLED false // Enable the matrix keypad and the HomeKit Access Code service
+#define KEYPAD_LAYOUT 0 // Keymap layout: 0 = 5x3 (1-9, *, 0, # + doorbell row), 1 = 4x4 (1-9, *, 0, #, A-D)
+#define KEYPAD_OUTPUT_GPIOS {39, 40, 41, 42, 45} // Keypad matrix output (row) pins
+#define KEYPAD_INPUT_GPIOS {46, 47, 48, 255} // Keypad matrix input (column) pins (255 = unused)
+#define KEYPAD_ACTIVE_LEVEL 1 // Active level of the keypad input pins
+#define KEYPAD_DEBOUNCE_TICKS 8 // Keypad debounce time in scan ticks
+#define KEYPAD_DOORBELL_KEY 0 // Doorbell key: 0 = layout default ('&' on 5x3, 'A' on 4x4), 'A'-'D' on 4x4, 255 = disabled
+#define KEYPAD_MIN_CODE_LENGTH 4 // Minimum access code length (1-16 digits)
+#define KEYPAD_MAX_CODE_LENGTH 16 // Maximum access code length (min-16 digits)
+#define KEYPAD_MAX_CODES 8 // Maximum number of stored access codes (1-255)

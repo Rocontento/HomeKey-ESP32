@@ -153,6 +153,19 @@ private:
       ALT_ACTION_LED,
       TAG_EVENT
     };
+    static constexpr const char* pin_function_str(PinFunctions fn) {
+      switch (fn) {
+        case ACTION:         return "ACTION";
+        case SUCCESS:        return "SUCCESS";
+        case FAIL:           return "FAIL";
+        case PIXEL:          return "PIXEL";
+        case ALT_ACTION:     return "ALT_ACTION";
+        case ALT_ACTION_INIT: return "ALT_ACTION_INIT";
+        case ALT_ACTION_LED: return "ALT_ACTION_LED";
+        case TAG_EVENT:      return "TAG_EVENT";
+      }
+      return "Unknown";
+    }
 
     /// The level an output rests at while its function is inactive. For the
     /// action pin that is the locked state, which is what the pad must be
@@ -160,5 +173,12 @@ private:
     bool idleLevelFor(PinFunctions func) const;
 
     std::map<PinFunctions, std::expected<GPIOAllocator::GPIOLease, GPIOAllocator::GPIOAllocatorError>> pinAllocations;
+
+    // True when the entry holds a usable pin. acquire() succeeds for the
+    // 255 "no pin" sentinel with an empty lease, so has_value() alone is not
+    // enough to gate hardware access.
+    static bool live(const std::expected<GPIOAllocator::GPIOLease, GPIOAllocator::GPIOAllocatorError>& e) {
+      return e.has_value() && e->valid();
+    }
     bool isr_service_installed;
 };

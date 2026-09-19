@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <atomic>
 #include <string>
 #include <vector>
@@ -29,16 +30,15 @@ struct WsFrame {
   int fd;
   httpd_ws_type_t type;
   size_t len;
-  uint8_t *payload;
+  const uint8_t *payload;
+  std::shared_ptr<std::vector<uint8_t>> sharedData;
   static constexpr size_t INLINE_SIZE = 128;
   uint8_t inlinePayload[INLINE_SIZE];
 };
 
 struct WsFrameDeleter {
   void operator()(WsFrame *frame) const {
-    if (frame && frame->payload != frame->inlinePayload)
-      delete[] frame->payload;
-    delete frame;
+    delete frame; // payload is owned by inlinePayload or sharedData
   }
 };
 
@@ -71,6 +71,16 @@ public:
   void setNfcManager(NfcManager *nfcManager) { m_nfcManager = nfcManager; }
   void broadcastWs(const uint8_t *payload, size_t len, httpd_ws_type_t type);
   void setWSBackLogSize(const uint16_t size);
+
+  /**
+   * @brief Number of WebSocket frames dropped because the send queue was full.
+   *
+   * Frames are dropped without blocking when the queue is full; this counter
+   * makes that backpressure observable (e.g. in the metrics broadcast).
+   */
+  [[nodiscard]] uint64_t getWsFrameDropCount() const {
+    return m_wsFrameDropped.load(std::memory_order_relaxed);
+  }
 
 private:
   // ------------------------------------------------------------------------
@@ -134,6 +144,7 @@ private:
   static esp_err_t handleCertificateDelete(httpd_req_t *req);
 
   static void captivePortalSaveTask(void* pvParameters);
+  static void captivePortalEthSaveTask(void* pvParameters);
   static esp_err_t handleCaptivePortal(httpd_req_t *req);
   static esp_err_t handleGetCaptivePortalConfig(httpd_req_t *req);
   static esp_err_t handleSaveCaptivePortalConfig(httpd_req_t *req);
@@ -151,7 +162,8 @@ private:
   void addWebSocketClient(int fd);
   void removeWebSocketClient(int fd);
   void queue_ws_frame(int fd, const uint8_t *payload, size_t len,
-                      httpd_ws_type_t type);
+                      httpd_ws_type_t type,
+                      const std::shared_ptr<std::vector<uint8_t>>& shared = nullptr);
   esp_err_t handleWebSocketMessage(httpd_req_t *req,
                                    const std::string &message);
 
@@ -196,7 +208,19 @@ private:
   std::mutex m_wsClientsMutex;
   esp_timer_handle_t m_statusTimer;
   std::deque<std::vector<uint8_t>> m_wsBroadcastBuffer;
+  std::mutex m_wsBroadcastMutex;
+  static constexpr size_t kMaxBacklogBytes = 16 * 1024;
+  static constexpr uint16_t kMaxBacklogFrames = 100;
+  size_t m_wsBroadcastBytes{0};
   std::atomic<uint16_t> wsBacklogSize{0};
+  std::atomic<uint64_t> m_wsFrameDropped{0};
+  uint64_t m_lastReportedWsFrameDropped{0};
   std::atomic<bool> m_otaInProgress{false};
   bool m_isInitialized{false};
+
+  std::mutex m_authDigestMutex;
+  std::string m_authDigest;
+  std::string m_authDigestUser;
+  std::string m_authDigestPass;
+  bool m_authDigestValid{false};
 };

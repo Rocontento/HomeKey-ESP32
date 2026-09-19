@@ -16,7 +16,6 @@
 #include "Pn7160Reader.hpp"
 #include "St25r3916Reader.hpp"
 #include "hal/gpio_types.h"
-#include "magic_enum.hpp"
 #include "RfQuietWindow.hpp"
 #include "utils.hpp"
 
@@ -26,7 +25,11 @@
 #include <chrono>
 #include <functional>
 #include <memory>
-#include <serialization.hpp>
+// See eventStructs.hpp: alpaca crc32 platform-detection workaround.
+#ifndef __gnu_linux__
+#define __gnu_linux__
+#endif
+#include "alpaca/alpaca.h"
 
 const char* NfcManager::TAG = "NfcManager";
 
@@ -128,23 +131,23 @@ NfcManager::NfcManager(NvsCredentialStore& readerDataManager,
 {
   std::copy(ECP_HEAD, ECP_HEAD + 8, m_ecpData.begin());
   if (nfcReaderType == ST25R3916) {
-    pinAllocations.emplace(PinFunctions::SDA, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[0]), GPIO_MODE_DISABLE, "I2C_SDA"));
-    pinAllocations.emplace(PinFunctions::SCL, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[1]), GPIO_MODE_DISABLE, "I2C_SCL"));
+    pinAllocations.emplace(PinFunctions::SDA, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[0]), GPIO_MODE_DISABLE, GPIOAllocator::PinRole::I2cSda, GPIOAllocator::PinConsumer::Nfc, "I2C_SDA"));
+    pinAllocations.emplace(PinFunctions::SCL, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[1]), GPIO_MODE_DISABLE, GPIOAllocator::PinRole::I2cScl, GPIOAllocator::PinConsumer::Nfc, "I2C_SCL"));
   } else {
-    pinAllocations.emplace(PinFunctions::SS, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[0]), GPIO_MODE_DISABLE, "SPI2_SS"));
-    pinAllocations.emplace(PinFunctions::SCK, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[1]), GPIO_MODE_DISABLE, "SPI2_SCK"));
-    pinAllocations.emplace(PinFunctions::MISO, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[2]), GPIO_MODE_DISABLE, "SPI2_MISO"));
-    pinAllocations.emplace(PinFunctions::MOSI, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[3]), GPIO_MODE_DISABLE, "SPI2_MOSI"));
+    pinAllocations.emplace(PinFunctions::SS, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[0]), GPIO_MODE_DISABLE, GPIOAllocator::PinRole::SpiCs, GPIOAllocator::PinConsumer::Nfc, "SPI2_SS"));
+    pinAllocations.emplace(PinFunctions::SCK, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[1]), GPIO_MODE_DISABLE, GPIOAllocator::PinRole::SpiSck, GPIOAllocator::PinConsumer::Nfc, "SPI2_SCK"));
+    pinAllocations.emplace(PinFunctions::MISO, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[2]), GPIO_MODE_DISABLE, GPIOAllocator::PinRole::SpiMiso, GPIOAllocator::PinConsumer::Nfc, "SPI2_MISO"));
+    pinAllocations.emplace(PinFunctions::MOSI, GPIOAllocator::instance().acquire(gpio_num_t(nfcGpioPins[3]), GPIO_MODE_DISABLE, GPIOAllocator::PinRole::SpiMosi, GPIOAllocator::PinConsumer::Nfc, "SPI2_MOSI"));
   }
   if (nfcReaderType == PN7160){
     if(nfcIrqPin != 255)
-      pinAllocations.emplace(PinFunctions::IRQ, GPIOAllocator::instance().acquire(gpio_num_t(nfcIrqPin), GPIO_MODE_DISABLE, "NFC_IRQ"));
+      pinAllocations.emplace(PinFunctions::IRQ, GPIOAllocator::instance().acquire(gpio_num_t(nfcIrqPin), GPIO_MODE_DISABLE, GPIOAllocator::PinRole::NfcIrq, GPIOAllocator::PinConsumer::Nfc, "NFC_IRQ"));
     if(nfcVenPin != 255)
-      pinAllocations.emplace(PinFunctions::VEN, GPIOAllocator::instance().acquire(gpio_num_t(nfcVenPin), GPIO_MODE_DISABLE, "NFC_VEN"));
+      pinAllocations.emplace(PinFunctions::VEN, GPIOAllocator::instance().acquire(gpio_num_t(nfcVenPin), GPIO_MODE_DISABLE, GPIOAllocator::PinRole::NfcVen, GPIOAllocator::PinConsumer::Nfc, "NFC_VEN"));
   }
   for(auto &p : pinAllocations){
     if(!p.second.has_value()){
-      ESP_LOGW(TAG, "Could not acquire GPIO Pin for '%s' with error '%s'", magic_enum::enum_name(p.first).cbegin(), magic_enum::enum_name(p.second.error()).cbegin());
+      ESP_LOGW(TAG, "Could not acquire GPIO Pin for '%s' with error '%s'", pin_function_str(p.first), GPIOAllocator::error_str(p.second.error()));
     }
   }
   m_hk_event = AppEventLoop::subscribe(HK_EVENT, HK_INTERNAL_EVENT, [&](const uint8_t* data, size_t size){
@@ -304,6 +307,7 @@ void NfcManager::pollingTask() {
     const uint16_t passiveTargetTimeoutMs = 150;
     const TickType_t pollDelayTicks =
         pdMS_TO_TICKS(m_nfcFastPollingEnabled ? 5 : 100);
+    std::vector<uint8_t> uid;
 
     ESP_LOGI(TAG,
              "NFC poll tuning active: delay=%lu ms, passiveTimeout=%u ms",
@@ -369,7 +373,6 @@ void NfcManager::pollingTask() {
         }
         m_txnCooldownTicks = 0;
 
-        std::vector<uint8_t> uid;
         std::array<uint8_t,2> atqa;
         uint8_t sak;
         if (m_reader->pollForTag(uid, atqa, sak, passiveTargetTimeoutMs)) {

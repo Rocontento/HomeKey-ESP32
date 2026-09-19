@@ -59,8 +59,7 @@ public:
 
     bool saveCertificate(espConfig::CertType certType, const std::string& certContent);
     bool deleteCertificate(espConfig::CertType certType);
-    std::string loadCertificate(espConfig::CertType certType);
-    
+
     std::vector<CertificateStatus> getCertificatesStatus();
     const espConfig::mqtt_ssl_t& getMqttSslConfig() const {
       return m_mqttSslConfig;
@@ -81,7 +80,7 @@ public:
                           std::map<std::string, uint8_t> *,
                           std::map<espConfig::actions_config_t::colorMap, uint8_t> *,
                           std::array<uint8_t, 4> *, std::array<uint8_t, 5> *,
-                          std::array<uint8_t, 7> *>>;
+                          std::array<uint8_t, 3> *, std::array<uint8_t, 7> *>>;
     void deserialize(msgpack_object obj, std::string key);
 
     template <typename ConfigType>
@@ -89,6 +88,11 @@ public:
 
     void loadConfigFromNvs(const char* key);
     bool saveConfigToNvs(const char* key);
+    static std::string pemToDer(const std::string& pem);
+    static size_t mbedtlsParseLen(const std::string& content);
+    void ensureMqttSslLoaded();
+    void migrateMqttSslPemToDer();
+    void loadCertificateInto(espConfig::CertType certType, std::string& out);
     bool validateCertificateWithMbedTLS(const std::string& certContent, espConfig::CertType certType);
     bool validateCertificateContent(const std::string& certContent, espConfig::CertType certType);
     bool validatePrivateKeyContent(const std::string& keyContent);

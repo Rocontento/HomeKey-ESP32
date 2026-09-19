@@ -26,6 +26,10 @@ menu:
       weight: 3
       params:
         type: search
+    - name: Version
+      weight: 4
+      params:
+        type: version-switcher
 
 params:
   navbar:
@@ -37,6 +41,8 @@ params:
       width: 40
       height: 20
     width: 'full'
+  banner:
+    versionWarning: "⚠️ This wiki is versioned — you are currently viewing the docs for the bleeding edge (main), not the latest release."
   description: "Documentation for HomeKey-ESP32"
   page:
     width: 'full'
